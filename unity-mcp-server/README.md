@@ -32,3 +32,5 @@ npm run build
 ## For AI Agents: Operational Directives & Project Context
 
 Please refer to [`AGENTS.md`](./AGENTS.md) for detailed operational directives and [`GEMINI.md`](./GEMINI.md) for a comprehensive project overview.
+
+**Mandatory Rule for Agent (Marmain):** Do not declare a task completed if an error occurred during its execution.
