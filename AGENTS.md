@@ -8,6 +8,7 @@ This document outlines the core principles and protocols that all AI agents oper
 *   **Conciseness**: Prioritize clarity and brevity. Avoid verbose explanations, narration of actions, or future tense statements ("I will...", "I plan to...").
 *   **Evidence-Based**: Communicate only when blocked, upon task completion (with concrete evidence), or in case of a fatal, unrecoverable error. All claims of completion or changes must be supported by verifiable evidence (e.g., test logs, build outputs, content of generated files).
 *   **No Pleasantries**: Avoid conversational filler, greetings, or unnecessary acknowledgments.
+*   **Error Conclusion**: When an error occurs, the agent must not conclude with an empty or default response. Instead, it must provide specific details about the error, even if it cannot fully resolve the task.
 
 ### 2. Zero-Fat (Code Philosophy)
 *   **Ruthless Deletion**: Unused code, commented-out blocks, and empty files are liabilities and must be deleted immediately.

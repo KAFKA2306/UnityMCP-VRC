@@ -6,7 +6,6 @@ namespace UnityMCP.Editor
 {
     public class UnityMCPWindow : EditorWindow
     {
-        // State tracking for efficient repainting
         private bool previousConnectionState;
         private string previousErrorMessage;
 
@@ -18,29 +17,24 @@ namespace UnityMCP.Editor
 
         void OnEnable()
         {
-            // Initialize state tracking
             previousConnectionState = UnityMCPConnection.IsConnected;
             previousErrorMessage = UnityMCPConnection.LastErrorMessage;
             
-            // Register for updates
             EditorApplication.update += CheckForChanges;
         }
 
         void OnDisable()
         {
-            // Clean up
             EditorApplication.update -= CheckForChanges;
         }
 
         void CheckForChanges()
         {
-            // Only repaint if something we're displaying has changed
             bool connectionChanged = previousConnectionState != UnityMCPConnection.IsConnected;
             bool errorChanged = previousErrorMessage != UnityMCPConnection.LastErrorMessage;
             
             if (connectionChanged || errorChanged)
             {
-                // Update cached values
                 previousConnectionState = UnityMCPConnection.IsConnected;
                 previousErrorMessage = UnityMCPConnection.LastErrorMessage;
                 
@@ -57,7 +51,6 @@ namespace UnityMCP.Editor
                 GUILayout.Label("UnityMCP Debug", EditorStyles.boldLabel);
                 EditorGUILayout.Space(5);
 
-                // Connection status with background
                 EditorGUILayout.BeginHorizontal(EditorStyles.helpBox);
                 EditorGUILayout.LabelField("Connection Status:", GUILayout.Width(120));
                 GUI.color = UnityMCPConnection.IsConnected ? Color.green : Color.red;
@@ -67,7 +60,6 @@ namespace UnityMCP.Editor
 
                 EditorGUILayout.Space(5);
 
-                // Server URI with background
                 EditorGUILayout.BeginHorizontal(EditorStyles.helpBox);
                 EditorGUILayout.LabelField("MCP Server URI:", GUILayout.Width(120));
                 EditorGUILayout.SelectableLabel(UnityMCPConnection.ServerUri.ToString(), EditorStyles.textField, GUILayout.Height(20));
@@ -75,7 +67,6 @@ namespace UnityMCP.Editor
 
                 EditorGUILayout.Space(10);
 
-                // Retry button - make it more prominent
                 if (GUILayout.Button("Retry Connection", GUILayout.Height(30)))
                 {
                     UnityMCPConnection.RetryConnection();
@@ -83,7 +74,6 @@ namespace UnityMCP.Editor
 
                 EditorGUILayout.Space(10);
 
-                // Last error message if any
                 if (!string.IsNullOrEmpty(UnityMCPConnection.LastErrorMessage))
                 {
                     EditorGUILayout.LabelField("Last Error:", EditorStyles.boldLabel);
@@ -95,7 +85,5 @@ namespace UnityMCP.Editor
                 EditorGUILayout.HelpBox($"Error in debug window: {e.Message}", MessageType.Error);
             }
         }
-
-        // Remove the old Update method as we're using EditorApplication.update instead
     }
 }

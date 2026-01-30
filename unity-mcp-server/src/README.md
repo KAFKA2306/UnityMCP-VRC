@@ -27,3 +27,7 @@ graph TD
     MCP --> Tools[Tools 登録]
     MCP --> Resources[Resources 登録]
 ```
+---
+## For AI Agents: Operational Directives & Project Context
+
+Please refer to [`AGENTS.md`](./AGENTS.md) for detailed operational directives and [`GEMINI.md`](./GEMINI.md) for a comprehensive project overview.

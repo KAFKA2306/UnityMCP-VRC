@@ -1,8 +1,3 @@
-import { WebSocket, WebSocketServer } from "ws";
-import { CommandResult, resolveCommandResult } from "../tools/ExecuteEditorCommandTool.js";
-import { LogEntry } from "../tools/index.js";
-import { resolveUnityEditorState, UnityEditorState } from "../tools/GetEditorStateTool.js";
-
 export class UnityConnection {
   private wsServer: WebSocketServer;
   private connection: WebSocket | null = null;
@@ -10,7 +5,6 @@ export class UnityConnection {
   private logBuffer: LogEntry[] = [];
   private readonly maxLogBufferSize = 1000;
 
-  // Event callbacks
   private onLogReceived: ((entry: LogEntry) => void) | null = null;
 
   constructor(port: number = 8080) {
@@ -79,14 +73,12 @@ export class UnityConnection {
   }
 
   private handleLogMessage(logEntry: LogEntry) {
-    // Add to buffer, removing oldest if at capacity
     this.logBuffer.push(logEntry);
     if (this.logBuffer.length > this.maxLogBufferSize) {
       this.logBuffer.shift();
     }
   }
 
-  // Public API
   public isConnected(): boolean {
     return this.connection !== null;
   }
@@ -113,10 +105,7 @@ export class UnityConnection {
     if (this.connection) return true;
 
     return new Promise<boolean>((resolve) => {
-      const timeout = setTimeout(() => resolve(false), timeoutMs);
-
       const connectionHandler = () => {
-        clearTimeout(timeout);
         this.wsServer.off("connection", connectionHandler);
         resolve(true);
       };

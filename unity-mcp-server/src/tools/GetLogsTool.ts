@@ -148,18 +148,14 @@ export class GetLogsTool implements Tool {
 
     // First apply all filters
     let filteredLogs = logBuffer.filter((log) => {
-      // Type filter
       if (types && !types.includes(log.logType)) return false;
 
-      // Message content filter
       if (messageContains && !log.message.includes(messageContains))
         return false;
 
-      // Stack trace content filter
       if (stackTraceContains && !log.stackTrace.includes(stackTraceContains))
         return false;
 
-      // Timestamp filters
       if (timestampAfter && new Date(log.timestamp) < new Date(timestampAfter))
         return false;
       if (
@@ -171,10 +167,8 @@ export class GetLogsTool implements Tool {
       return true;
     });
 
-    // Then apply count limit
     filteredLogs = filteredLogs.slice(-count);
 
-    // Finally apply field selection if specified
     if (fields?.length) {
       return filteredLogs.map((log) => {
         const selectedFields: Partial<LogEntry> = {};

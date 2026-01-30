@@ -28,3 +28,7 @@ npm run build
 
 ビルド成果物は `build/` ディレクトリに出力されます。
 
+---
+## For AI Agents: Operational Directives & Project Context
+
+Please refer to [`AGENTS.md`](./AGENTS.md) for detailed operational directives and [`GEMINI.md`](./GEMINI.md) for a comprehensive project overview.

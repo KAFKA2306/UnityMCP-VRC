@@ -16,3 +16,7 @@ graph LR
     User[開発者] -- 配置 --> Markdown[Markdown Files]
     Markdown -- 自動読み込み --> LLM[Claude Context]
 ```
+---
+## For AI Agents: Operational Directives & Project Context
+
+Please refer to [`AGENTS.md`](./AGENTS.md) for detailed operational directives and [`GEMINI.md`](./GEMINI.md) for a comprehensive project overview.

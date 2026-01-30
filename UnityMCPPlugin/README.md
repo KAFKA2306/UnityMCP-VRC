@@ -16,3 +16,7 @@ graph LR
     MCP_Server -- WebSocket --> Plugin[UnityMCPPlugin]
     Plugin -- 操作 --> Editor[Unity Editor API]
 ```
+---
+## For AI Agents: Operational Directives & Project Context
+
+Please refer to [`AGENTS.md`](./AGENTS.md) for detailed operational directives and [`GEMINI.md`](./GEMINI.md) for a comprehensive project overview.

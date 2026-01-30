@@ -31,3 +31,7 @@ sequenceDiagram
     WS-->>Tool: resolveCommandResult()
     Tool-->>Client: Result JSON
 ```
+---
+## For AI Agents: Operational Directives & Project Context
+
+Please refer to [`AGENTS.md`](./AGENTS.md) for detailed operational directives and [`GEMINI.md`](./GEMINI.md) for a comprehensive project overview.

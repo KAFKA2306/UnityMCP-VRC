@@ -10,41 +10,30 @@ namespace UnityMCP.VRChatUtils
 {
     public static class UdonSharpHelper
     {
-        /// <summary>
-        /// Creates a UdonSharp asset file for a given C# script
-        /// There isn't an easy way I've found to do this programmatically so this method does it by manually creating an asset file
-        /// </summary>
-        /// <param name="scriptPath">Path to the cs file relative to the Assets folder</param>
-        /// <returns>Path to the created asset file</returns>
         public static string CreateAsset(string scriptPath)
         {
-            // Validate script path
             if (string.IsNullOrEmpty(scriptPath) || !scriptPath.EndsWith(".cs"))
             {
                 ThrowAndLog("Invalid script path: " + scriptPath);
             }
 
-            // Get the script GUID
             string scriptGuid = AssetDatabase.AssetPathToGUID(scriptPath);
             if (string.IsNullOrEmpty(scriptGuid))
             {
                 ThrowAndLog("Could not find GUID for script at path: " + scriptPath);
             }
 
-            // Verify UdonSharp program asset GUID
             string udonSharpProgramAssetGuid = GetUdonSharpProgramAssetGuid();
             if (string.IsNullOrEmpty(udonSharpProgramAssetGuid))
             {
                 ThrowAndLog("UdonSharpProgramAsset GUID not found. Please ensure UdonSharp is installed correctly.");
             }
 
-            // Determine the asset name and path
             string scriptName = Path.GetFileNameWithoutExtension(scriptPath);
             string assetName = scriptName;
             string scriptDirectory = Path.GetDirectoryName(scriptPath);
             string assetPath = Path.Combine(scriptDirectory, assetName + ".asset");
 
-            // Create the asset data
             var assetData = $@"%YAML 1.1
 %TAG !u! tag:unity3d.com,2011:
 --- !u!114 &11400000
@@ -65,27 +54,18 @@ MonoBehaviour:
   variableNames: []
   variableValues: []";
 
-            // Write the asset file
             File.WriteAllText(assetPath, assetData);
             Debug.Log($"Created UdonSharp asset at: {assetPath}");
 
-            // Refresh the AssetDatabase to detect the new file
             AssetDatabase.Refresh();
 
-            // Request a full script compilation
             CompilationPipeline.RequestScriptCompilation();
 
-            // Return the path to the created asset
             return assetPath;
         }
 
-        /// <summary>
-        /// Attempts to find the GUID of the UdonSharpProgramAsset script in the project
-        /// </summary>
-        /// <returns>GUID of the UdonSharpProgramAsset script or empty string if not found</returns>
         private static string GetUdonSharpProgramAssetGuid()
         {
-            // Try to find UdonSharpProgramAsset.cs by name
             string[] guids = AssetDatabase.FindAssets("UdonSharpProgramAsset t:MonoScript");
             foreach (string guid in guids)
             {

@@ -19,7 +19,6 @@ class UnityMCPServer {
   private initialized = false;
 
   constructor() {
-    // Initialize MCP Server
     this.server = new Server(
       {
         name: "unity-mcp-server",
@@ -33,10 +32,8 @@ class UnityMCPServer {
       },
     );
 
-    // Initialize WebSocket Server for Unity communication
     this.unityConnection = new UnityConnection(8080);
 
-    // Error handling
     this.server.onerror = (error) => console.error("[MCP Error]", error);
     process.on("SIGINT", async () => {
       await this.cleanup();
@@ -44,7 +41,6 @@ class UnityMCPServer {
     });
   }
 
-  /** Initialize the server asynchronously */
   async initialize() {
     if (this.initialized) return;
     
@@ -54,11 +50,9 @@ class UnityMCPServer {
     this.initialized = true;
   }
 
-  /** Optional resources the user can include in Claude Desktop to give additional context to the LLM */
   private async setupResources() {
     const resources = await getAllResources();
 
-    // Set up the resource request handler
     this.server.setRequestHandler(
       ListResourcesRequestSchema,
       async (request) => {
@@ -68,7 +62,6 @@ class UnityMCPServer {
       },
     );
 
-    // Read resource contents
     this.server.setRequestHandler(
       ReadResourceRequestSchema,
       async (request) => {
@@ -86,7 +79,6 @@ class UnityMCPServer {
 
         const resourceContext: ResourceContext = {
           unityConnection: this.unityConnection,
-          // Add any other context properties needed
         };
 
         const content = await resource.getContents(resourceContext);
@@ -107,19 +99,15 @@ class UnityMCPServer {
   private setupTools() {
     const tools = getAllTools();
 
-    // List available tools with comprehensive documentation
     this.server.setRequestHandler(ListToolsRequestSchema, async () => ({
       tools: tools.map((tool) => tool.getDefinition()),
     }));
 
-    // Handle tool calls with enhanced validation and error handling
     this.server.setRequestHandler(CallToolRequestSchema, async (request) => {
       const { name, arguments: args } = request.params;
 
-      // Find the requested tool
       const tool = tools.find((t) => t.getDefinition().name === name);
 
-      // Validate tool exists with helpful error message
       if (!tool) {
         const availableTools = tools.map((t) => t.getDefinition().name);
         throw new McpError(
@@ -130,35 +118,19 @@ class UnityMCPServer {
         );
       }
 
-      // Try executing with retry logic for connection issues
-      let retryCount = 0;
-      const maxRetries = 5;
-      const retryDelay = 5000; // 5 seconds
-
-      while (true) {
-        // Verify Unity connection with detailed error message
-        if (!this.unityConnection.isConnected()) {
-          if (retryCount < maxRetries) {
-            retryCount++;
-            console.error(`Unity Editor not connected. Retrying in 5 seconds... (${retryCount}/${maxRetries})`);
-            await new Promise(resolve => setTimeout(resolve, retryDelay));
-            continue;
-          }
-          throw new McpError(
-            ErrorCode.InternalError,
-            "Unity Editor is not connected. Please ensure the Unity Editor is running and the UnityMCP window is open.",
-          );
-        }
-
-        // Create context object for tool execution
-        const toolContext: ToolContext = {
-          unityConnection: this.unityConnection,
-          logBuffer: this.unityConnection.getLogBuffer(),
-        };
-
-        // Execute the tool
-        return await tool.execute(args, toolContext);
+      if (!this.unityConnection.isConnected()) {
+        throw new McpError(
+          ErrorCode.InternalError,
+          "Unity Editor is not connected. Please ensure the Unity Editor is running and the UnityMCP window is open.",
+        );
       }
+
+      const toolContext: ToolContext = {
+        unityConnection: this.unityConnection,
+        logBuffer: this.unityConnection.getLogBuffer(),
+      };
+
+      return await tool.execute(args, toolContext);
     });
   }
 
@@ -174,9 +146,8 @@ class UnityMCPServer {
     await this.server.connect(transport);
     console.error("Unity MCP server running on stdio");
 
-    // Wait for WebSocket server to be ready
     await new Promise<void>((resolve) => {
-      setTimeout(resolve, 100); // Small delay to ensure WebSocket server is initialized
+      setTimeout(resolve, 100);
     });
   }
 }

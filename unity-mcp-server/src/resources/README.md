@@ -17,3 +17,7 @@ graph TD
 ## 拡張方法
 
 新しいテキストリソースを追加するには、単に `text/` ディレクトリにファイルを配置するだけです。サーバー再起動時に自動的に認識されます。
+---
+## For AI Agents: Operational Directives & Project Context
+
+Please refer to [`AGENTS.md`](./AGENTS.md) for detailed operational directives and [`GEMINI.md`](./GEMINI.md) for a comprehensive project overview.

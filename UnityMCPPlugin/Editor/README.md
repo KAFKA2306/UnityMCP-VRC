@@ -25,3 +25,7 @@ graph TD
     Assembly --> Reflection[Reflection Invoke]
     Reflection --> UnityAPI[Unity Editor API]
 ```
+---
+## For AI Agents: Operational Directives & Project Context
+
+Please refer to [`AGENTS.md`](./AGENTS.md) for detailed operational directives and [`GEMINI.md`](./GEMINI.md) for a comprehensive project overview.

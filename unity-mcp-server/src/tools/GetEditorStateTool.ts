@@ -18,11 +18,9 @@ export interface UnityEditorStateHandler {
   reject: (reason?: any) => void;
 }
 
-// Command state management
 let unityEditorStatePromise: UnityEditorStateHandler | null = null;
 let unityEditorStateTime: number | null = null;
 
-// New method to resolve the command result - called when results arrive from Unity
 export function resolveUnityEditorState(result: UnityEditorState): void {
   if (unityEditorStatePromise) {
     unityEditorStatePromise.resolve(result);
@@ -83,35 +81,15 @@ export class GetEditorStateTool implements Tool {
     }
 
     try {
-      // Clear previous logs and set command start time
       const startLogIndex = context.logBuffer.length;
       unityEditorStateTime = Date.now();
 
-      // Send command to Unity to get editor state
       context.unityConnection!.sendMessage("getEditorState", {});
 
-      // Wait for result with timeout handling
-      const timeoutMs = 60_000;
-      const editorState = await Promise.race([
-        new Promise<UnityEditorState>((resolve, reject) => {
-          unityEditorStatePromise = { resolve, reject };
-        }),
-        new Promise<never>((_, reject) =>
-          setTimeout(
-            () =>
-              reject(
-                new Error(
-                  `Getting editor state timed out after ${
-                    timeoutMs / 1000
-                  } seconds. This may indicate an issue with the Unity Editor.`,
-                ),
-              ),
-            timeoutMs,
-          ),
-        ),
-      ]);
+      const editorState = await new Promise<UnityEditorState>((resolve, reject) => {
+        unityEditorStatePromise = { resolve, reject };
+      });
 
-      // Process the response based on format
       let responseData: any;
       switch (format) {
         case "Raw":
@@ -128,7 +106,6 @@ export class GetEditorStateTool implements Tool {
         ],
       };
     } catch (error) {
-      // Enhanced error handling
       if (error instanceof Error && error.message.includes("timed out")) {
         throw new McpError(ErrorCode.InternalError, error.message);
       }

@@ -25,7 +25,6 @@ namespace UnityMCP.Editor
         private static bool isLoggingEnabled = true;
         private static EditorStateReporter editorStateReporter;
 
-        // Public properties for the debug window
         public static bool IsConnected => isConnected;
         public static Uri ServerUri => serverUri;
         public static string LastErrorMessage => lastErrorMessage;
@@ -54,7 +53,6 @@ namespace UnityMCP.Editor
             public DateTime Timestamp { get; set; }
         }
 
-        // Public method to manually retry connection
         public static void RetryConnection()
         {
             Debug.Log("[UnityMCP] Manually retrying connection...");
@@ -62,10 +60,8 @@ namespace UnityMCP.Editor
         }
         private static readonly CancellationTokenSource cts = new CancellationTokenSource();
 
-        // Constructor called on editor startup
         static UnityMCPConnection()
         {
-            // Start capturing logs before anything else
             Application.logMessageReceived += HandleLogMessage;
             isLoggingEnabled = true;
 
@@ -75,7 +71,6 @@ namespace UnityMCP.Editor
                 Debug.Log("[UnityMCP] Starting initial connection");
                 ConnectToServer();
             };
-            EditorApplication.update += Update;
         }
 
         private static void HandleLogMessage(string message, string stackTrace, LogType type)
@@ -99,7 +94,6 @@ namespace UnityMCP.Editor
                 }
             }
 
-            // Send log to server if connected
             if (isConnected && webSocket?.State == WebSocketState.Open)
             {
                 SendLogToServer(logEntry);
@@ -150,33 +144,26 @@ namespace UnityMCP.Editor
                 (webSocket.State == WebSocketState.Connecting ||
                  webSocket.State == WebSocketState.Open))
             {
-                // Debug.Log("[UnityMCP] Already connected or connecting");
                 return;
             }
 
             try
             {
                 Debug.Log($"[UnityMCP] Attempting to connect to MCP Server at {serverUri}");
-                // Debug.Log($"[UnityMCP] Current Unity version: {Application.unityVersion}");
-                // Debug.Log($"[UnityMCP] Current platform: {Application.platform}");
 
                 webSocket = new ClientWebSocket();
                 webSocket.Options.KeepAliveInterval = TimeSpan.FromSeconds(60);
 
-                var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(5));
-                using var linkedCts = CancellationTokenSource.CreateLinkedTokenSource(cts.Token, timeout.Token);
-
-                await webSocket.ConnectAsync(serverUri, linkedCts.Token);
+                await webSocket.ConnectAsync(serverUri, cts.Token);
                 isConnected = true;
                 Debug.Log("[UnityMCP] Successfully connected to MCP Server");
                 StartReceiving();
                 
-                // Initialize editor state reporter
                 editorStateReporter = new EditorStateReporter();
             }
             catch (OperationCanceledException)
             {
-                lastErrorMessage = "[UnityMCP] Connection attempt timed out";
+                lastErrorMessage = "[UnityMCP] Connection attempt canceled";
                 Debug.LogError(lastErrorMessage);
                 isConnected = false;
             }
@@ -184,32 +171,13 @@ namespace UnityMCP.Editor
             {
                 lastErrorMessage = $"[UnityMCP] WebSocket error: {we.Message}\nDetails: {we.InnerException?.Message}";
                 Debug.LogError(lastErrorMessage);
-                // Debug.LogError($"[UnityMCP] Stack trace: {we.StackTrace}");
                 isConnected = false;
             }
             catch (Exception e)
             {
                 lastErrorMessage = $"[UnityMCP] Failed to connect to MCP Server: {e.Message}\nType: {e.GetType().Name}";
                 Debug.LogError(lastErrorMessage);
-                // Debug.LogError($"[UnityMCP] Stack trace: {e.StackTrace}");
                 isConnected = false;
-            }
-        }
-
-        private static float reconnectTimer = 0f;
-        private static readonly float reconnectInterval = 5f;
-
-        private static void Update()
-        {
-            if (!isConnected && webSocket?.State != WebSocketState.Open)
-            {
-                reconnectTimer += Time.deltaTime;
-                if (reconnectTimer >= reconnectInterval)
-                {
-                    Debug.Log("[UnityMCP] Attempting to reconnect...");
-                    ConnectToServer();
-                    reconnectTimer = 0f;
-                }
             }
         }
 
@@ -225,21 +193,17 @@ namespace UnityMCP.Editor
                     
                     if (result.MessageType == WebSocketMessageType.Text)
                     {
-                        // Add received data to our message buffer
                         messageBuffer.AddRange(new ArraySegment<byte>(buffer, 0, result.Count));
                         
-                        // If this is the end of the message, process it
                         if (result.EndOfMessage)
                         {
                             var message = Encoding.UTF8.GetString(messageBuffer.ToArray());
                             await HandleMessage(message);
                             messageBuffer.Clear();
                         }
-                        // Otherwise, continue receiving the rest of the message
                     }
                     else if (result.MessageType == WebSocketMessageType.Close)
                     {
-                        // Handle close message
                         await webSocket.CloseAsync(WebSocketCloseStatus.NormalClosure, string.Empty, cts.Token);
                         isConnected = false;
                         Debug.Log("[UnityMCP] WebSocket connection closed normally");
