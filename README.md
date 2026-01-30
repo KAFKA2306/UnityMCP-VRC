@@ -1,91 +1,93 @@
-Forked from [Arodoid/UnityMCP](https://github.com/Arodoid/UnityMCP) see that page for the
-original README.md
+[Arodoid/UnityMCP](https://github.com/Arodoid/UnityMCP) のフォーク版です。オリジナルの README.md はリンク先をご覧ください。
 
-## About 
+## 概要
 
-This repo has been extensively refactored from the source. I've been testing using Claude/MCP/Unity to create
-VRChat worlds. Claude has trouble getting UdonSharp scripts to compile so this repo supports 
-MCP resources and helper scripts which improves it's success rate in building VRC worlds
+このリポジトリは、元のコードを大幅に整理・改良したものです。
 
-This repo also has a many general improvements that work with normal Unity development. Try it out. 
+私は Claude、MCP、Unity を組み合わせて VRChat のワールドを作っています。しかし、Claude は UdonSharp（VRChat用のC#）のコンパイルでエラーを出しがちです。
+そこで、このツールでは MCP リソースと補助スクリプトを用意し、Claude が正確にコードを書けるようにサポートしました。これにより、ワールド制作の成功率がぐっと上がります。
 
-## Improvements 
+もちろん、通常の Unity 開発でも便利に使える機能がたくさんあります。ぜひ試してみてください。
 
-### Command Execution
-- Changed how code is executed so that the LLM can define the usings, classes, and functions
-  - Allows the LLM to execute more complex commands with multiple functions
-- Stack traces eat up a lot of context so just return the first line which is usually enough
-- Incorporated references for various modules:
+## 主な改良点
+
+### コマンド実行の改善
+- AI が `using`（ライブラリの読み込み）、クラス、関数を自由に定義して実行できるようにしました。
+  - これにより、複雑な処理も1つのコマンドで実行できます。
+- エラーログ（スタックトレース）が長すぎると AI の記憶容量（コンテキスト）を圧迫するため、通常必要な「最初の1行」だけを返すようにしました。
+- よく使う以下のモジュールをあらかじめ使える状態にしました：
   - .Net Standard
   - System.Core, System.IO
-  - TextMeshPro assembly
-  - VRChat assemblies
-  - Unity Physics
-  - A reference to MCPUnity itself so you can provide helper functions to MCP commands
+  - TextMeshPro（テキスト表示）
+  - VRChat 関連ライブラリ
+  - Unity Physics（物理演算）
+  - MCPUnity 自体（MCP コマンドの補助機能用）
 
-### Unity Editor Integration
-- Added functionality to wait/retry when Unity is not connected to process commands
-- Changed `getEditorState` to run on demand instead of continuously
-- Implemented waiting for pending compilations when getting editor state and running commands
-- Revised GetAssets to retrieve all content from the Assets/ folder
+### Unity エディタとの連携
+- コマンド実行時に Unity が接続されていなければ、つながるまで待機・再試行します。
+- `getEditorState`（状態取得）は、必要なときだけ実行するようにしました。
+- コンパイル中（ロード中）は、終わるまで待ってから次の処理を行います。
+- `GetAssets` で、Assets フォルダ内の全ファイルを正しく取得できるようにしました。
 
-### Manual Script Testing
-- Created a script tester for diagnosing C# script commands
-- Allows manually executing editor commands with detailed logging
+### 手動スクリプトテスト
+- AI が生成した C# コードを、人間が手動でテストできる画面を作りました。
+- 詳細なログを見ながら実行確認ができます。
 
-### MCP Resources
-- Any files added to resources/text will be exposed as a MCP resource
+### MCP リソース機能
+- `resources/text` フォルダに入れたファイルは、自動的に MCP リソースとして AI に公開されます。
 
-### Performance
-- Fixed MCP window high CPU usage by only repainting when changes are detected
-- Enabled support for commands longer than 4KB in Unity
-- Reduced excessive debug logs during reconnection process
+### パフォーマンス向上
+- 画面の変化があったときだけ描画するようにし、PC への負荷（CPU使用率）を下げました。
+- 非常に長いコード（4KB以上）も Unity で実行できるようにしました。
+- 再接続中の無駄なログ出力を減らしました。
 
-### Code Refactoring
-- Refactored Unity connection into its own dedicated file
-- Separated MCP server tools into individual files
-  - With a common interface to make adding new tools easier
-- Split editor state reporting and command execution into their own files
+### コードの整理
+- Unity との通信処理を専用ファイルに分け、見やすくしました。
+- サーバー側のツール機能もファイルごとに分割しました。
+  - 新しいツールを追加しやすく設計しています。
+- エディタの状態報告と、コマンド実行の処理を分けました。
 
-### VRChat Specific features
-- Added a helper script that supports generating UdonSharp asset files from C# files
+### VRChat 専用機能
+- C# ファイルから UdonSharp 用のアセットファイルを自動生成する補助スクリプトを追加しました。
 
-## How to Use
+## 使い方
 
-- Build the MCP Server from unity-mcp-server/
-  - `npm run install`
-  - `npm run build`
+1. **MCP サーバーの準備**
+   - `unity-mcp-server/` フォルダで以下を実行します。
+     - `npm run install`
+     - `npm run build`
 
-- In Unity
-  - Copy over the UnityMCPPlugin/ directory into your Assets folder
-  - You should now see a UnityMCP menu in your project
-    - Select `Debug Window` and dock by your projects
+2. **Unity での準備**
+   - `UnityMCPPlugin/` フォルダを、あなたの Unity プロジェクトの `Assets` フォルダにコピーします。
+   - Unity のメニューバーに `UnityMCP` が追加されます。
+     - `Debug Window` を選び、使いやすい場所にウィンドウを配置してください。
 
-- In Claude Desktop
-  - Enable developer mode
-  - Add the MCP server in File/Settings
-  ```
-  {
-      "mcpServers": {
-          "unity": {
-              "command": "node",
-              "args": [
-                  "C:\\git\\UnityMCP\\unity-mcp-server\\build\\index.js"
-              ]
-          }
-      }
-  }
-  ```
-  - Verify in the UnityMCP Debug Window, the Connection Status is green/connected
-  - Enter your prompt
-    - Click the attach button below the prompt to add resource artifacts
-    - Any file you add to the resources/text folder is exposed as a resource
-      - You need to build the project and restart Claude for it to see new resources
-  - Run your prompt
-    - You should see scripts executing
-    - If there are script errors you can diagnose them in Unity
-      - The UnityMCP menu has a Script Tester where you can paste in scripts to run them manually
+3. **Claude Desktop での設定**
+   - 開発者モード（Developer Mode）を有効にします。
+   - File > Settings を開き、MCP サーバーを追加します。
+   ```json
+   {
+       "mcpServers": {
+           "unity": {
+               "command": "node",
+               "args": [
+                   "C:\\git\\UnityMCP\\unity-mcp-server\\build\\index.js"
+               ]
+           }
+       }
+   }
+   ```
+   - Unity の `Debug Window` を見て、「Connection Status」が緑色（Connected）になれば準備完了です。
 
-## License
+4. **使い始める**
+   - Claude にプロンプトを入力します。
+   - プロンプト欄の下にある添付ボタン（クリップマーク）を押し、必要なリソース（情報）を追加します。
+   - `resources/text` フォルダに入れたファイルはリソースとして使えます。
+     - ※新しいファイルを追加した場合は、サーバーをビルドし直して Claude を再起動してください。
+   - 実行すると、Unity 側でスクリプトが動きます。
+   - もしエラーが出たら、Unity の `Script Tester` にコードを貼り付けて、手動で原因を調べることもできます。
 
-This project is licensed under the Creative Commons Attribution-NonCommercial 4.0 International (CC BY-NC 4.0).
+## ライセンス
+
+このプロジェクトは **Creative Commons Attribution-NonCommercial 4.0 International (CC BY-NC 4.0)** の下で公開されています。
+（非営利目的での利用・改変・再配布が可能です）

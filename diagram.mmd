@@ -1,40 +1,40 @@
 sequenceDiagram
-    participant User
-    participant MCPClient as MCP Client
-    participant MCPServer as MCP Server<br/>(index.ts)
-    participant UnityConn as Unity Connection<br/>(UnityMCPConnection.cs)
-    participant UnityEditor as Unity Editor
+    participant User as ユーザー
+    participant MCPClient as MCP クライアント
+    participant MCPServer as MCP サーバー<br/>(index.ts)
+    participant UnityConn as Unity 接続<br/>(UnityMCPConnection.cs)
+    participant UnityEditor as Unity エディタ
 
-    User->>MCPClient: Issue command
-    MCPClient->>MCPServer: Call tool<br/>(CallToolRequestSchema)
+    User->>MCPClient: コマンドを実行
+    MCPClient->>MCPServer: ツールを呼び出す<br/>(CallToolRequestSchema)
     
-    alt Tool: execute_editor_command
-        MCPServer->>UnityConn: Send WebSocket message<br/>(type: "executeEditorCommand")
-        Note over MCPServer: Creates commandResultPromise<br/>in UnityMCPServer class
+    alt execute_editor_command (コマンド実行)
+        MCPServer->>UnityConn: WebSocketで送信<br/>("executeEditorCommand")
+        Note over MCPServer: 結果が返るまで待機
         
-        UnityConn->>UnityConn: HandleMessage()<br/>identifies command type
-        UnityConn->>UnityEditor: CSEditorHelper.ExecuteCommand()<br/>or ExecuteSimpleCommand()
-        Note over UnityConn: Compiles and executes C# code
+        UnityConn->>UnityConn: メッセージを受信
+        UnityConn->>UnityEditor: C#コードを実行<br/>(CSEditorHelper)
+        Note over UnityConn: コンパイルして即実行
         
-        UnityEditor-->>UnityConn: Return execution result
-        UnityConn-->>MCPServer: WebSocket response<br/>(type: "commandResult")
+        UnityEditor-->>UnityConn: 実行結果
+        UnityConn-->>MCPServer: 結果を返信<br/>("commandResult")
         
-        Note over MCPServer: handleUnityMessage()<br/>resolves commandResultPromise
-    else Tool: get_editor_state
-        MCPServer->>MCPServer: Return current editorState
-        Note over MCPServer: No direct Unity communication<br/>State updated via background polling
-    else Tool: get_logs
-        MCPServer->>MCPServer: filterLogs()
-        Note over MCPServer: Returns logs from buffer<br/>Unity sends logs continuously
+        Note over MCPServer: 待機終了、結果を処理
+    else get_editor_state (状態取得)
+        MCPServer->>MCPServer: 保存してある状態を返す
+        Note over MCPServer: Unityには問い合わせない<br/>(定期更新された値を使う)
+    else get_logs (ログ取得)
+        MCPServer->>MCPServer: ログを検索して返す
+        Note over MCPServer: Unityから届いたログは<br/>常に保存されている
     end
     
-    MCPServer-->>MCPClient: Return tool result
-    MCPClient-->>User: Display result
+    MCPServer-->>MCPClient: ツールの結果を返す
+    MCPClient-->>User: 結果を表示
 
-    loop Background Communication
-        UnityConn->>MCPServer: Send editor state updates<br/>(type: "editorState")
-        Note over UnityConn: StartSendingEditorState()<br/>every 1 second
+    loop バックグラウンド通信 (常に動いている)
+        UnityConn->>MCPServer: エディタの状態を送信<br/>("editorState")
+        Note over UnityConn: 1秒ごとに更新
         
-        UnityConn->>MCPServer: Send log messages<br/>(type: "log")
-        Note over UnityConn: HandleLogMessage()<br/>on Application.logMessageReceived
+        UnityConn->>MCPServer: ログを送信<br/>("log")
+        Note over UnityConn: ログが出るたびに送信
     end

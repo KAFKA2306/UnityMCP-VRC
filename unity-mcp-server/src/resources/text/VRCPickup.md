@@ -1,40 +1,47 @@
-Allows objects to be picked up, held and used by players.
+プレイヤーが「拾う」「持つ」「使う」ことができるオブジェクトを作ります。
 
-## Proximity Rules
+## 距離（Proximity）のルール
 
 :::note
-
-All of the rules described in this section also apply to "Interactables", i.e. UdonBehaviours that have an `Interact` event (they will also show a "Proximity" slider in the Inspector).
+ここでの説明は、「Interactables（触れるもの）」全般に当てはまります。
 :::
 
-The "Proximity" value defines from how far away your pickup will be grabbable. It is given in meters, aka. "Unity units", where the side-length of one default Cube equals 1 unit.
+「Proximity（距離）」の設定値は、**どのくらい離れた場所からその物を掴めるか**をメートル単位（Unityの1単位＝1メートル）で決めます。
 
-There are 2 mechanisms of grabbing where the Proximity value will be in play:
+掴み方には2種類あり、距離の計算方法が少し違います。
 
-- **Raycast:** If you are far away from a pickup, or you are running in desktop mode, pickups will be highlighted if the "laser" coming out of your hands (in VR) or your head (desktop) intersects the collider on a pickup object. The distance calculation to compare against Proximity is different in VR and Desktop mode:
-    - VR: The distance between the origin of the laser (i.e. your hand controllers) and the impact point on the collider, in meters
-    - Desktop: The distance between the origin of the laser (i.e. your head or main camera position) minus an "extra reach" value to compensate for being unable to move your hands forward. This is an approximate value that also takes your avatar scale into account ("longer arms"). Since it is subtracted from the distance, it will allow you to grab objects that are technically outside of the "Proximity" range, but could be grabbed by moving your arms while standing in this position in VR.
-- **Hover (VR only):** If your hands are close enough to an object, pickups will be highlighted even if a ray in the direction of the UI laser would not intersect the object. This allows more natural "grabbing" of objects. The distance of reach is a sphere centered on your hands with a radius of 0.4 meters times your avatar scale (note that this value is not directly comparable to the "avatar scaling" system available to users, although changing the avatar scale that way can affect the reach). 
-    - The "Proximity" value is still compared against the raw distance between your hand and the collider on the pickup, meaning the "reach distance" described is only an upper bound for the closeness at which "Hover" mode will engage.
-    - For example, setting the Proximity to 0 will require the hand to be _inside_ the collider for the pickup to be highlighted (it will still be grabbable in Desktop mode however, because of the "extra reach" desktop users get to compensate).
-    - As an advanced technique, you may want to adjust the Proximity value based on the data provided via the [avatar scaling system](/worlds/udon/players/player-avatar-scaling).
+1. **レーザーで掴む (Raycast)**
+   - 遠くにある物を、手（VR）や視線（デスクトップ）から出るレーザーで指して掴む方法です。
+   - **VR**: コントローラーから対象までの距離で判定します。
+   - **デスクトップ**: 視点からの距離で判定しますが、手が前に出せない分、「おまけの距離」が加算されます。つまり、数値よりも少し遠くまで届きます。
 
-## Requires:
+2. **直接触れて掴む (Hover / VRのみ)**
+   - 手がオブジェクトに十分近ければ、レーザーが当たっていなくても掴めます。
+   - こちらの方が自然に掴めます。
+   - 手の周囲 0.4メートル（アバターの大きさによる）が有効範囲です。
+   - ただし、基本の判定は「Proximity」の値です。Proximity を 0 にすると、手がオブジェクトの中にめり込まないと掴めなくなります。
 
-- Rigidbody
-- Collider
+:::tip
+Proximity の値は、アバターの大きさに合わせて調整するのが上級テクニックです。
+:::
 
-| Parameter | Description |
+## 必要なもの
+この機能を使うには、オブジェクトに以下が必要です。
+- **Rigidbody**（物理挙動）
+- **Collider**（当たり判定）
+
+## 設定項目
+
+| 設定名 | 説明 |
 | - | - |
-| Momentum Transfer Method         | This defines how the collision force will be added to the other object which was hit, using Rigidbody.AddForceAtPosition.<br />Note: the force will only be added if 'AllowCollisionTransfer' is on. |
-| Disallow Theft                   | If other users are allowed to take the pickup out of someone else's grip |
-| Exact Gun                        | The position object will be held if set to Exact Gun |
-| Exact Grip                       | The position object will be held if set to Exact Grip. |
-| Allow Manipulation When Equipped | Should the user be able to manipulate the pickup while the pickup is held if using a controller? |
-| Orientation                      | What way the object will be held. |
-| Auto Hold                        | Should the pickup remain in the user's hand after they let go of the grab button.<br />- Auto Detect: Automatically detects what to do<br />- Yes: After the grab button is released the pickup remains in the hand until the drop button is pressed and released<br />- No: After the grab button is released the pickup is let go<br />Note: This only applies to control schemes which lack an independent "Use" input from "Grab", such as Desktop, Vive, and Vive-like input systems. This does not apply to Quest, Quest-like, and other input systems with a defined trigger. |
-| Use Text                         | Text that appears when the user has an object equipped, prompting them to "fire" the object.<br />Requires "Auto Hold" to be set to "Yes". |
-| Throw Velocity Boost Min Speed   | How fast the object needs to move to be thrown. |
-| Throw Velocity Boost Scale       | How much throwing should scale. Higher = faster thrown while lower means slower throw speed. |
-| Pickupable                       | Can you pick up the pickup? |
-| Proximity                        | The maximum distance this pickup is reachable from. See section above for more details. |
+| **Momentum Transfer Method** | 物をぶつけた時、相手にどう力を伝えるか。<br />※下の `AllowCollisionTransfer` がオンの時だけ有効。 |
+| **Disallow Theft** | オンにすると、人が持っている物を奪えなくなります。 |
+| **Exact Gun** | 銃のように、決まった向きで持ちます。 |
+| **Exact Grip** | 決まった位置・向きで持ちます。 |
+| **Allow Manipulation...** | 持っている最中に、その物を操作できるかどうか。 |
+| **Orientation** | 持った時の向きを指定します。 |
+| **Auto Hold** | ボタンを離しても持ち続けるか。<br />- **Yes**: 離しても持ち続けます。もう一度ボタンを押すと落とします。<br />- **No**: ボタンを離すとすぐに落とします。<br />※Quest等のトリガーがあるコントローラーでは関係ありません。 |
+| **Use Text** | 持った時に表示されるメッセージ（例：「撃つ」など）。<br />※`Auto Hold` が Yes の時のみ有効。 |
+| **Throw Velocity...** | 物を投げる時の設定。<br />- **Min Speed**: 投げる判定になる最低速度。<br />- **Scale**: 投げる強さの倍率。 |
+| **Pickupable** | チェックを外すと、拾えなくなります。 |
+| **Proximity** | 掴める最大距離（メートル）。 |

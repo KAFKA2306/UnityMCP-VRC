@@ -1,37 +1,57 @@
 # UdonSharp
 
-## A compiler for compiling C# to Udon assembly
+## C# を Udon（VRChat用プログラム）に変換するもの
 
-UdonSharp is a compiler that compiles C# to Udon assembly. UdonSharp is not currently conformant to any version of the C# language specification, so there are many things that are not implemented or will not work.
+UdonSharp は、C# で書いたコードを VRChat で動く形式（Udon アセンブリ）に変換するコンパイラです。
+ただし、**通常の C# とは少し違います。** C# のすべての機能が使えるわけではありません。
 
-## C# features supported
-- Flow control
-    - Supports: `if` `else` `while` `for` `do` `foreach` `switch` `return` `break` `continue` `ternary operator (condition ? true : false)` `??`
-- Implicit and explicit type conversions
-- Arrays and array indexers
-- All builtin arithmetic operators
-- Conditional short circuiting `(true || CheckIfTrue())` will not execute CheckIfTrue()
-- `typeof()`
-- Extern methods with out or ref parameters (such as many variants of `Physics.Raycast()`)
-- User defined methods with parameters and return values, supports out/ref, extension methods, and `params`
-- User defined properties
-- Static user methods
-- UdonSharpBehaviour inheritence, virtual methods, etc.
-- Unity/Udon event callbacks with arguments. For instance, registering a OnPlayerJoined event with a VRCPlayerApi argument is valid.
-- String interpolation
-- Field initializers
-- Jagged arrays
-- Referencing other custom UdonSharpBehaviour classes, accessing fields, and calling methods on them
-- Recursive method calls are supported via the `[RecursiveMethod]` attribute
+## 使える機能
+- **基本的な制御**
+    - `if`, `else`, `while`, `for`, `do`, `foreach`, `switch`, `return`, `break`, `continue`
+    - 三項演算子 `条件 ? A : B`, `??`
+- **型変換**
+    - 自動変換も、手動変換（キャスト）もOK
+- **配列**
+    - 配列とその要素へのアクセス
+- **計算**
+    - 足し算、引き算などの基本的な計算
+- **条件の省略**
+    - `(true || Check())` のように、結果が確定したら後ろの処理を飛ばす機能（ショートサーキット）
+- **型情報の取得**
+    - `typeof()`
+- **外部メソッド**
+    - `Physics.Raycast()` のような `out` や `ref` を使う Unity の機能
+- **自作メソッド**
+    - 引数や戻り値のあるメソッド。`out` / `ref` / `params` も使用可能
+- **プロパティ**
+    - `get` / `set` を持つプロパティ
+- **静的メソッド (static)**
+- **クラスの継承**
+    - `UdonSharpBehaviour` を継承したクラス作り
+- **イベント**
+    - Unity や Udon のイベント（例：`OnPlayerJoined`）
+- **文字列**
+    - `$"変数: {x}"` のような文字列補間
+- **初期化**
+    - フィールド変数の初期設定
+- **ジャグ配列**
+    - 配列の配列（`int[][]` など）
+- **他のスクリプトとの連携**
+    - 別の UdonSharpBehaviour を変数に入れて、そのメソッドや変数を使うこと
+- **再帰呼び出し**
+    - 自分自身を呼び出すメソッド（`[RecursiveMethod]` 属性が必要）
 
-## Differences from regular Unity C# to note
-- For the best experience making UdonSharp scripts, make your scripts inherit from `UdonSharpBehaviour` instead of `MonoBehaviour`
-- If you need to call `GetComponent<UdonBehaviour>()` you will need to use `(UdonBehaviour)GetComponent(typeof(UdonBehaviour))` at the moment since the generic get component is not exposed for UdonBehaviour yet. `GetComponent<T>()` works for other Unity component types though.
-- Udon currently only supports array `[]` collections and by extension UdonSharp only supports arrays at the moment. It looks like they might support `List<T>` at some point, but it is not there yet.
-- Field initilizers are evaluated at compile time, if you have any init logic that depends on other objects in the scene you should use Start for this.
-- Use the `UdonSynced` attribute on fields that you want to sync.
-- Numeric casts are checked for overflow due to UdonVM limitations
-- The internal type of variables returned by `.GetType()` will not always match what you may expect since U# abstracts some types in order to make them work in Udon. For instance, any jagged array type will return a type of `object[]` instead of something like `int[][]` for a 2D int jagged array.
+## 普通の Unity C# との違い（重要）
+- **継承元**: `MonoBehaviour` ではなく、**`UdonSharpBehaviour`** を継承してください。
+- **GetComponent**: `GetComponent<UdonBehaviour>()` はそのままでは動きません。
+  - 代わりに `(UdonBehaviour)GetComponent(typeof(UdonBehaviour))` と書いてください。
+  - ※他のコンポーネント（Transform など）なら `GetComponent<Transform>()` で大丈夫です。
+- **リスト**: `List<T>` はまだ使えません。配列 `[]` を使ってください。
+- **初期化のタイミング**: 変数の初期値（`int a = 10;` など）はコンパイル時に決まります。ゲーム開始時に他のオブジェクトの情報を入れたい場合は、`Start()` メソッドの中で書いてください。
+- **同期**: ネットワーク同期したい変数には `[UdonSynced]` を付けてください。
+- **計算の制限**: 数値の計算で桁あふれ（オーバーフロー）が起きないようチェックされます。
+- **型チェック**: `.GetType()` の結果が、思ったものと違うことがあります（Udon の仕組み上、型がまとめられているため）。
+  - 例：`int[][]`（整数の2次元配列）の型を調べると `object[]` と返ってきます。
 
-## Udon bugs that affect U#
-- Mutating methods on structs do not modify the struct (this can be seen on things like calling Normalize() on a Vector3) https://vrchat.canny.io/vrchat-udon-closed-alpha-bugs/p/raysetorigin-and-raysetdirection-not-working
+## 知っておくべきバグ
+- **構造体の変更**: `Vector3` などの構造体に対して、値を直接書き換えるメソッド（`Normalize()` など）を呼んでも、値が変わらないことがあります。

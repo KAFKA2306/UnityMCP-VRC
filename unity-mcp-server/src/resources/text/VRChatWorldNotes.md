@@ -1,35 +1,39 @@
-# VRChat World Unity Project Notes
+# VRChat ワールド制作ノート
 
-## Project Structure
-- Put all new assets in the `Assets/Game/` folder
-- Before making edits, examine existing components to understand what's already in place
+## プロジェクトのルール
+- 新しいファイルはすべて `Assets/Game/` フォルダに入れてください。
+- 作業を始める前に、既にあるコンポーネントを見て、どんな仕組みになっているか確認しましょう。
 
-## Development Best Practices
-- Use multiple `execute_editor_commands` instead of trying to do everything in one command
-- Unity and UdonSharp are complex environments with many potential issues
-- Break down your tasks into smaller, more manageable commands
+## 開発のコツ
+- **コマンドは小分けにする**: 
+  - 1つのコマンドで「あれもこれも」やろうとすると失敗します。
+  - Unity と UdonSharp は複雑なので、少しずつ処理を実行するのが確実です。
 
-## Useful Commands
+## よく使うコマンド
 
-### Creating UdonSharp Asset Files
-To create the corresponding asset file for UdonSharp scripts so you can attach them to components in Unity:
+### UdonSharp 用のアセットを作る
+C# スクリプト (`.cs`) を書いただけでは、ゲームオブジェクトに取り付けられません。
+以下のコマンドで、取り付け可能な「プログラムアセット」を作成します。
+
 ```csharp
 UnityMCP.VRChatUtils.UdonSharpHelper.CreateAsset("Assets/Game/yourScript.cs");
 ```
 
-### Compiling the Project
-To compile the entire project and check for errors in the code:
+### コンパイル（エラーチェック）
+プロジェクト全体をコンパイルして、コードに間違いがないか確認します。
+
 ```csharp
 CompilationPipeline.RequestScriptCompilation();
 ```
 
-## Rendering Text in Udon
+## Udon での文字表示
+昔の Unity の `Text` コンポーネントは、Udon から操作できない機能が多いため使わないでください。
 
-Legacy Unity TextMesh (or UI.Text) components can't be used directly in Udon because many of their methods and properties aren't exposed. Instead:
+**代わりにこれを使います：**
+- **TextMeshPro**（VRChat で推奨されています）
+- もし入っていなければ、Unity の Package Manager からインストールしてください。
 
-- Use TextMeshPro-based components that are supported by VRChat's Udon
-- If TextMeshPro is not installed, it can be added via the Unity Package Manager
-
-## Code Guidelines
-- Don't end lines with `\\` to continue a string to the next line as that is not valid C#
-- If unsure about implementation, ask for clarification
+## コードを書く時の注意
+- 文字列を複数行に書くとき、行末に `\` を置く書き方は C# では禁止です。
+  - `@"..."` や `+` でつなぐ書き方をしてください。
+- どう書けばいいか迷ったら、適当に書かずに質問してください。
