@@ -1,3 +1,8 @@
+import { WebSocket, WebSocketServer } from "ws";
+import { CommandResult, resolveCommandResult } from "../tools/ExecuteEditorCommandTool.js";
+import { LogEntry } from "../tools/index.js";
+import { resolveUnityEditorState, UnityEditorState } from "../tools/GetEditorStateTool.js";
+
 export class UnityConnection {
   private wsServer: WebSocketServer;
   private connection: WebSocket | null = null;

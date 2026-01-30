@@ -21,26 +21,16 @@ export class TextResource implements Resource {
   }
 
   async getContents(context: ResourceContext): Promise<string> {
-    try {
-      return await fs.readFile(this.filePath, "utf8");
-    } catch (error) {
-      console.error(`Error reading text file ${this.filePath}:`, error);
-      return `Error loading text file: ${this.fileName}`;
-    }
+    return await fs.readFile(this.filePath, "utf8");
   }
 }
 
 export async function loadTextResources(
   directoryPath: string,
 ): Promise<TextResource[]> {
-  try {
-    const textFiles = await fs.readdir(directoryPath);
+  const textFiles = await fs.readdir(directoryPath);
 
-    return textFiles.map(
-      (file) => new TextResource(path.join(directoryPath, file)),
-    );
-  } catch (error) {
-    console.error("Error loading text resources:", error);
-    return [];
-  }
+  return textFiles.map(
+    (file) => new TextResource(path.join(directoryPath, file)),
+  );
 }

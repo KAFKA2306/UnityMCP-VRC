@@ -33,16 +33,13 @@ namespace UnityMCP.Editor
                 var commandObj = JsonConvert.DeserializeObject<EditorCommandData>(commandData);
                 var code = commandObj.code;
 
-                Debug.Log($"[UnityMCP] Executing code...");
-                // Execute the code directly in the Editor context
+                Debug.Log("[UnityMCP] Executing code...");
                 try
                 {
-                    // Execute the provided code
                     var result = CompileAndExecute(code);
 
-                    Debug.Log($"[UnityMCP] Code executed");
+                    Debug.Log("[UnityMCP] Code executed");
 
-                    // Send back detailed execution results
                     var resultMessage = JsonConvert.SerializeObject(new
                     {
                         type = "commandResult",
@@ -71,7 +68,6 @@ namespace UnityMCP.Editor
                 var error = $"[UnityMCP] Failed to execute editor command: {e.Message}\n{firstStackLine}";
                 Debug.LogError(error);
 
-                // Send back error information
                 var errorMessage = JsonConvert.SerializeObject(new
                 {
                     type = "commandResult",
@@ -120,21 +116,16 @@ namespace UnityMCP.Editor
 
         public static object CompileAndExecute(string code)
         {
-            // Wait for any ongoing Unity compilation to finish first
             EditorUtilities.WaitForUnityCompilation();
 
-            // Use Mono's built-in compiler
             var options = new System.CodeDom.Compiler.CompilerParameters
             {
                 GenerateInMemory = true,
-                // Fixes error: The predefined type 'xxx' is defined multiple times. Using definition from 'mscorlib.dll'
                 CompilerOptions = "/nostdlib+ /noconfig"
             };
 
-            // Track added assemblies to avoid duplicates
             HashSet<string> addedAssemblies = new HashSet<string>();
 
-            // Helper method to safely add assembly references
             void AddAssemblyReference(string assemblyPath)
             {
                 if (!string.IsNullOrEmpty(assemblyPath) && !addedAssemblies.Contains(assemblyPath))
@@ -165,17 +156,14 @@ namespace UnityMCP.Editor
             {
                 options.CoreAssemblyFileName = typeof(object).Assembly.Location;
 
-                // Add engine/editor core references
                 AddAssemblyReference(typeof(UnityEngine.Object).Assembly.Location);
                 AddAssemblyReference(typeof(UnityEditor.Editor).Assembly.Location);
 
-                AddAssemblyReference(typeof(System.Linq.Enumerable).Assembly.Location); // Add System.Core for LINQ
-                AddAssemblyReference(typeof(object).Assembly.Location); // Add mscorlib
+                AddAssemblyReference(typeof(System.Linq.Enumerable).Assembly.Location);
+                AddAssemblyReference(typeof(object).Assembly.Location);
 
-                // Add this assembly so script can use utilities we provide
                 AddAssemblyReference(typeof(UnityMCP.Editor.EditorCommandExecutor).Assembly.Location);
 
-                // Add netstandard assembly
                 var netstandardAssembly = AppDomain.CurrentDomain.GetAssemblies()
                     .FirstOrDefault(a => a.GetName().Name == "netstandard");
                 if (netstandardAssembly != null)
@@ -183,7 +171,6 @@ namespace UnityMCP.Editor
                     AddAssemblyReference(netstandardAssembly.Location);
                 }
 
-                // Add common Unity modules
                 var commonModules = new[] {
                     "UnityEngine.AnimationModule",
                     "UnityEngine.CoreModule",
@@ -201,7 +188,6 @@ namespace UnityMCP.Editor
                     AddAssemblyByName(moduleName);
                 }
 
-                // Add VRChat Udon and UdonSharp assemblies
                 var vrchatAssemblies = new[] {
                     "VRC.Udon",
                     "VRC.Udon.Common",
@@ -212,28 +198,24 @@ namespace UnityMCP.Editor
                     "UdonSharp.Editor",
                     "UdonSharp.Runtime",
                     "VRCSDK3",
-                    "VRCSDKBase", // Additional VRC SDK parts that might be needed
+                    "VRCSDKBase",
                 };
 
                 foreach (var assemblyName in vrchatAssemblies)
                 {
                     AddAssemblyByName(assemblyName);
                 }
-
-                // Debug.Log("Added Assembly References:" + string.join(", ", options.ReferencedAssemblies));
             }
             catch (Exception e)
             {
                 Debug.LogWarning($"[UnityMCP] Assembly reference setup issue: {e.Message}");
             }
 
-            // Compile and execute
             using (var provider = new Microsoft.CSharp.CSharpCodeProvider())
             {
                 var results = provider.CompileAssemblyFromSource(options, code);
                 if (results.Errors.HasErrors)
                 {
-                    //Debug.LogError($"Assembly references: {string.Join(", ", options.ReferencedAssemblies)}");
                     foreach (CompilerError error in results.Errors)
                     {
                         Debug.LogError($"Error {error.ErrorNumber}: {error.ErrorText}, Line {error.Line}");

@@ -1,4 +1,3 @@
-import { ErrorCode, McpError } from "@modelcontextprotocol/sdk/types.js";
 import { Tool, ToolContext, ToolDefinition } from "./types.js";
 
 export interface UnityEditorState {
@@ -19,7 +18,6 @@ export interface UnityEditorStateHandler {
 }
 
 let unityEditorStatePromise: UnityEditorStateHandler | null = null;
-let unityEditorStateTime: number | null = null;
 
 export function resolveUnityEditorState(result: UnityEditorState): void {
   if (unityEditorStatePromise) {
@@ -72,50 +70,32 @@ export class GetEditorStateTool implements Tool {
     const format = (args?.format as string) || "Raw";
 
     if (args?.format && !validFormats.includes(format)) {
-      throw new McpError(
-        ErrorCode.InvalidParams,
+      throw new Error(
         `Invalid format: "${format}". Valid formats are: ${validFormats.join(
           ", ",
         )}`,
       );
     }
 
-    try {
-      const startLogIndex = context.logBuffer.length;
-      unityEditorStateTime = Date.now();
-
+    const editorState = await new Promise<UnityEditorState>((resolve, reject) => {
+      unityEditorStatePromise = { resolve, reject };
       context.unityConnection!.sendMessage("getEditorState", {});
+    });
 
-      const editorState = await new Promise<UnityEditorState>((resolve, reject) => {
-        unityEditorStatePromise = { resolve, reject };
-      });
-
-      let responseData: any;
-      switch (format) {
-        case "Raw":
-          responseData = editorState;
-          break;
-      }
-
-      return {
-        content: [
-          {
-            type: "text",
-            text: JSON.stringify(responseData, null, 2),
-          },
-        ],
-      };
-    } catch (error) {
-      if (error instanceof Error && error.message.includes("timed out")) {
-        throw new McpError(ErrorCode.InternalError, error.message);
-      }
-
-      throw new McpError(
-        ErrorCode.InternalError,
-        `Failed to process editor state: ${
-          error instanceof Error ? error.message : "Unknown error"
-        }`,
-      );
+    let responseData: any;
+    switch (format) {
+      case "Raw":
+        responseData = editorState;
+        break;
     }
+
+    return {
+      content: [
+        {
+          type: "text",
+          text: JSON.stringify(responseData, null, 2),
+        },
+      ],
+    };
   }
 }

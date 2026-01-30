@@ -15,7 +15,6 @@ namespace UnityMCP.Editor
     {
         private string lastErrorMessage = "";
 
-        // New method to send editor state
         public async Task SendEditorState(ClientWebSocket webSocket, CancellationToken cancellationToken)
         {
             try
@@ -47,13 +46,11 @@ namespace UnityMCP.Editor
         {
             try
             {
-                // Wait for any ongoing Unity compilation to finish first
                 EditorUtilities.WaitForUnityCompilation();
 
                 var activeGameObjects = new List<string>();
                 var selectedObjects = new List<string>();
 
-                // Use FindObjectsByType instead of FindObjectsOfType
                 var foundObjects = GameObject.FindObjectsByType<GameObject>(FindObjectsSortMode.None);
                 if (foundObjects != null)
                 {
@@ -209,16 +206,16 @@ namespace UnityMCP.Editor
                 foreach (var component in components)
                 {
                     try
-                    {
-                        if (component != null)
                         {
-                            validComponents.Add(component.GetType().Name);
+                            if (component != null)
+                            {
+                                validComponents.Add(component.GetType().Name);
+                            }
                         }
-                    }
-                    catch (Exception e)
-                    {
-                        Debug.LogWarning($"[UnityMCP] Failed to get component name: {e.Message}");
-                    }
+                        catch (Exception e)
+                        {
+                            Debug.LogWarning($"[UnityMCP] Failed to get component name: {e.Message}");
+                        }
                 }
 
                 return validComponents.ToArray();

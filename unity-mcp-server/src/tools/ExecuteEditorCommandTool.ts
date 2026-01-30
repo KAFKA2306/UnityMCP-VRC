@@ -1,4 +1,3 @@
-import { ErrorCode, McpError } from "@modelcontextprotocol/sdk/types.js";
 import {
   Tool,
   ToolContext,
@@ -24,7 +23,6 @@ export interface CommandResultHandler {
 }
 
 let commandResultPromise: CommandResultHandler | null = null;
-let commandStartTime: number | null = null;
 
 export function resolveCommandResult(result: CommandResult): void {
   if (commandResultPromise) {
@@ -62,23 +60,6 @@ The code must have a EditorCommand class with a static Execute method that retur
           "Returns the execution result and any logs generated during execution",
         format: 'JSON object containing "result" and "logs" fields',
       },
-      errorHandling: {
-        description: "Common error scenarios and their handling:",
-        scenarios: [
-          {
-            error: "Compilation error",
-            handling: "Returns compilation error details in logs",
-          },
-          {
-            error: "Runtime exception",
-            handling: "Returns exception details and stack trace",
-          },
-          {
-            error: "Timeout",
-            handling: "Command execution timeout after 5 seconds",
-          },
-        ],
-      },
       examples: [
         {
           description: "Center selected object",
@@ -110,88 +91,52 @@ public class EditorCommand
 
   async execute(args: any, context: ToolContext) {
     if (!args?.code) {
-      throw new McpError(
-        ErrorCode.InvalidParams,
+      throw new Error(
         "The code parameter is required",
       );
     }
 
     if (typeof args.code !== "string") {
-      throw new McpError(
-        ErrorCode.InvalidParams,
+      throw new Error(
         "The code parameter must be a string",
       );
     }
 
     if (args.code.trim().length === 0) {
-      throw new McpError(
-        ErrorCode.InvalidParams,
+      throw new Error(
         "The code parameter cannot be empty",
       );
     }
 
-    try {
-      const startLogIndex = context.logBuffer.length;
-      commandStartTime = Date.now();
+    const startLogIndex = context.logBuffer.length;
 
-      context.unityConnection!.sendMessage("executeEditorCommand", {
-        code: args.code,
-      });
+    context.unityConnection!.sendMessage("executeEditorCommand", {
+      code: args.code,
+    });
 
-      const result = await new Promise((resolve, reject) => {
-        commandResultPromise = { resolve, reject };
-      });
+    const result = await new Promise((resolve, reject) => {
+      commandResultPromise = { resolve, reject };
+    });
 
-      const commandLogs = context.logBuffer
-        .slice(startLogIndex)
-        .filter((log) => log.message.includes("[UnityMCP]"));
+    const commandLogs = context.logBuffer
+      .slice(startLogIndex)
+      .filter((log) => log.message.includes("[UnityMCP]"));
 
-      const executionTime = Date.now() - (commandStartTime || 0);
-
-      return {
-        content: [
-          {
-            type: "text",
-            text: JSON.stringify(
-              {
-                result,
-                logs: commandLogs,
-                executionTime: `${executionTime}ms`,
-                status: "success",
-              },
-              null,
-              2,
-            ),
-          },
-        ],
-      };
-    } catch (error) {
-      if (error instanceof Error) {
-        if (error.message.includes("timed out")) {
-          throw new McpError(ErrorCode.InternalError, error.message);
-        }
-
-        if (error.message.includes("NullReferenceException")) {
-          throw new McpError(
-            ErrorCode.InvalidParams,
-            "The code attempted to access a null object. Please check that all GameObject references exist.",
-          );
-        }
-
-        if (error.message.includes("CompileError")) {
-          throw new McpError(
-            ErrorCode.InvalidParams,
-            "C# compilation error. Please check the syntax of your code.",
-          );
-        }
-      }
-
-      throw new McpError(
-        ErrorCode.InternalError,
-        `Failed to execute command: ${
-          error instanceof Error ? error.message : "Unknown error"
-        }`,
-      );
-    }
+    return {
+      content: [
+        {
+          type: "text",
+          text: JSON.stringify(
+            {
+              result,
+              logs: commandLogs,
+              status: "success",
+            },
+            null,
+            2,
+          ),
+        },
+      ],
+    };
   }
 }

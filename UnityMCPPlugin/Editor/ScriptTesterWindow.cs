@@ -5,10 +5,9 @@ using System.Collections.Generic;
 using UnityMCP.Editor;
 using Newtonsoft.Json;
 
-/** Used to diagnose why code LLM generates can't run */
 public class ScriptTester : EditorWindow
 {
-    private string scriptCode = "using UnityEngine;\nusing UnityEditor;\nusing System;\nusing System.Collections.Generic;\nusing System.Linq;\n\npublic class EditorCommand\n{\n    public static object Execute()\n    {\n        // Your code here\n        return \"Hello from Script Tester!\";\n    }\n}";
+    private string scriptCode = "using UnityEngine;\nusing UnityEditor;\nusing System;\nusing System.Collections.Generic;\nusing System.Linq;\n\npublic class EditorCommand\n{\n    public static object Execute()\n    {\n        return \"Hello from Script Tester!\";\n    }\n}";
     private Vector2 codeScrollPosition;
     private Vector2 resultScrollPosition;
     private Vector2 logsScrollPosition; // Added scroll position for logs
@@ -154,7 +153,7 @@ public class ScriptTester : EditorWindow
         if (string.IsNullOrEmpty(input))
             return input;
             
-        try
+try
         {
             // Remove backticks if present
             if (input.StartsWith("`"))
@@ -169,10 +168,10 @@ public class ScriptTester : EditorWindow
                 string currentLine = lines[i];
                 
                 // Check if the current line ends with a comma and backslash
-                while (i < lines.Length - 1 && currentLine.TrimEnd().EndsWith("\\"))
+                while (i < lines.Length - 1 && currentLine.TrimEnd().EndsWith("\"))
                 {
                     // Remove the trailing backslash and join with the next line
-                    currentLine = currentLine.TrimEnd().TrimEnd('\\') + lines[i + 1].TrimStart();
+                    currentLine = currentLine.TrimEnd().TrimEnd('\') + lines[i + 1].TrimStart();
                     i++; // Skip the next line since we've joined it
                 }
                 

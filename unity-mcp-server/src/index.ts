@@ -3,10 +3,8 @@ import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import {
   CallToolRequestSchema,
-  ErrorCode,
   ListResourcesRequestSchema,
   ListToolsRequestSchema,
-  McpError,
   ReadResourceRequestSchema,
 } from "@modelcontextprotocol/sdk/types.js";
 import { UnityConnection } from "./communication/UnityConnection.js";
@@ -69,8 +67,7 @@ class UnityMCPServer {
         const resource = resources.find((r) => r.getDefinition().uri === uri);
 
         if (!resource) {
-          throw new McpError(
-            ErrorCode.MethodNotFound,
+          throw new Error(
             `Resource not found: ${uri}. Available resources: ${resources
               .map((r) => r.getDefinition().uri)
               .join(", ")}`,
@@ -110,8 +107,7 @@ class UnityMCPServer {
 
       if (!tool) {
         const availableTools = tools.map((t) => t.getDefinition().name);
-        throw new McpError(
-          ErrorCode.MethodNotFound,
+        throw new Error(
           `Unknown tool: ${name}. Available tools are: ${availableTools.join(
             ", ",
           )}`,
@@ -119,8 +115,7 @@ class UnityMCPServer {
       }
 
       if (!this.unityConnection.isConnected()) {
-        throw new McpError(
-          ErrorCode.InternalError,
+        throw new Error(
           "Unity Editor is not connected. Please ensure the Unity Editor is running and the UnityMCP window is open.",
         );
       }
@@ -145,10 +140,6 @@ class UnityMCPServer {
     const transport = new StdioServerTransport();
     await this.server.connect(transport);
     console.error("Unity MCP server running on stdio");
-
-    await new Promise<void>((resolve) => {
-      setTimeout(resolve, 100);
-    });
   }
 }
 

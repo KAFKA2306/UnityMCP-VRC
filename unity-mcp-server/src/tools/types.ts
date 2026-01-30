@@ -19,13 +19,6 @@ export interface ToolDefinition {
     input: any;
     output: string;
   }[];
-  errorHandling?: {
-    description: string;
-    scenarios: {
-      error: string;
-      handling: string;
-    }[];
-  };
 }
 
 export interface ToolContext {
