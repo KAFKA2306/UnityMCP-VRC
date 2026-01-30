@@ -19,7 +19,6 @@ namespace UnityMCP.Editor
         private static ClientWebSocket webSocket;
         private static bool isConnected = false;
         private static readonly Uri serverUri = new Uri("ws://localhost:8080");
-        private static string lastErrorMessage = "";
         private static readonly Queue<LogEntry> logBuffer = new Queue<LogEntry>();
         private static readonly int maxLogBufferSize = 1000;
         private static bool isLoggingEnabled = true;
@@ -27,7 +26,6 @@ namespace UnityMCP.Editor
 
         public static bool IsConnected => isConnected;
         public static Uri ServerUri => serverUri;
-        public static string LastErrorMessage => lastErrorMessage;
         public static bool IsLoggingEnabled
         {
             get => isLoggingEnabled;
@@ -51,12 +49,6 @@ namespace UnityMCP.Editor
             public string StackTrace { get; set; }
             public LogType Type { get; set; }
             public DateTime Timestamp { get; set; }
-        }
-
-        public static void RetryConnection()
-        {
-            Debug.Log("[UnityMCP] Manually retrying connection...");
-            ConnectToServer();
         }
         private static readonly CancellationTokenSource cts = new CancellationTokenSource();
 
@@ -102,27 +94,20 @@ namespace UnityMCP.Editor
 
         private static async void SendLogToServer(LogEntry logEntry)
         {
-            try
+            var message = JsonConvert.SerializeObject(new
             {
-                var message = JsonConvert.SerializeObject(new
+                type = "log",
+                data = new
                 {
-                    type = "log",
-                    data = new
-                    {
-                        message = logEntry.Message,
-                        stackTrace = logEntry.StackTrace,
-                        logType = logEntry.Type.ToString(),
-                        timestamp = logEntry.Timestamp
-                    }
-                });
+                    message = logEntry.Message,
+                    stackTrace = logEntry.StackTrace,
+                    logType = logEntry.Type.ToString(),
+                    timestamp = logEntry.Timestamp
+                }
+            });
 
-                var buffer = Encoding.UTF8.GetBytes(message);
-                await webSocket.SendAsync(new ArraySegment<byte>(buffer), WebSocketMessageType.Text, true, cts.Token);
-            }
-            catch (Exception e)
-            {
-                Debug.LogError($"[UnityMCP] Failed to send log to server: {e.Message}");
-            }
+            var buffer = Encoding.UTF8.GetBytes(message);
+            await webSocket.SendAsync(new ArraySegment<byte>(buffer), WebSocketMessageType.Text, true, cts.Token);
         }
 
         public static string[] GetRecentLogs(LogType[] types = null, int count = 100)
@@ -147,95 +132,60 @@ namespace UnityMCP.Editor
                 return;
             }
 
-            try
-            {
-                Debug.Log($"[UnityMCP] Attempting to connect to MCP Server at {serverUri}");
+            Debug.Log($"[UnityMCP] Attempting to connect to MCP Server at {serverUri}");
 
-                webSocket = new ClientWebSocket();
-                webSocket.Options.KeepAliveInterval = TimeSpan.FromSeconds(60);
+            webSocket = new ClientWebSocket();
+            webSocket.Options.KeepAliveInterval = TimeSpan.FromSeconds(60);
 
-                await webSocket.ConnectAsync(serverUri, cts.Token);
-                isConnected = true;
-                Debug.Log("[UnityMCP] Successfully connected to MCP Server");
-                StartReceiving();
-                
-                editorStateReporter = new EditorStateReporter();
-            }
-            catch (OperationCanceledException)
-            {
-                lastErrorMessage = "[UnityMCP] Connection attempt canceled";
-                Debug.LogError(lastErrorMessage);
-                isConnected = false;
-            }
-            catch (WebSocketException we)
-            {
-                lastErrorMessage = $"[UnityMCP] WebSocket error: {we.Message}\nDetails: {we.InnerException?.Message}";
-                Debug.LogError(lastErrorMessage);
-                isConnected = false;
-            }
-            catch (Exception e)
-            {
-                lastErrorMessage = $"[UnityMCP] Failed to connect to MCP Server: {e.Message}\nType: {e.GetType().Name}";
-                Debug.LogError(lastErrorMessage);
-                isConnected = false;
-            }
+            await webSocket.ConnectAsync(serverUri, cts.Token);
+            isConnected = true;
+            Debug.Log("[UnityMCP] Successfully connected to MCP Server");
+            StartReceiving();
+            
+            editorStateReporter = new EditorStateReporter();
         }
 
         private static async void StartReceiving()
         {
             var buffer = new byte[1024 * 4];
             var messageBuffer = new List<byte>();
-            try
+            
+            while (webSocket.State == WebSocketState.Open)
             {
-                while (webSocket.State == WebSocketState.Open)
+                var result = await webSocket.ReceiveAsync(new ArraySegment<byte>(buffer), cts.Token);
+                
+                if (result.MessageType == WebSocketMessageType.Text)
                 {
-                    var result = await webSocket.ReceiveAsync(new ArraySegment<byte>(buffer), cts.Token);
+                    messageBuffer.AddRange(new ArraySegment<byte>(buffer, 0, result.Count));
                     
-                    if (result.MessageType == WebSocketMessageType.Text)
+                    if (result.EndOfMessage)
                     {
-                        messageBuffer.AddRange(new ArraySegment<byte>(buffer, 0, result.Count));
-                        
-                        if (result.EndOfMessage)
-                        {
-                            var message = Encoding.UTF8.GetString(messageBuffer.ToArray());
-                            await HandleMessage(message);
-                            messageBuffer.Clear();
-                        }
-                    }
-                    else if (result.MessageType == WebSocketMessageType.Close)
-                    {
-                        await webSocket.CloseAsync(WebSocketCloseStatus.NormalClosure, string.Empty, cts.Token);
-                        isConnected = false;
-                        Debug.Log("[UnityMCP] WebSocket connection closed normally");
-                        break;
+                        var message = Encoding.UTF8.GetString(messageBuffer.ToArray());
+                        await HandleMessage(message);
+                        messageBuffer.Clear();
                     }
                 }
-            }
-            catch (Exception e)
-            {
-                Debug.LogError($"Error receiving message: {e.Message}");
-                isConnected = false;
+                else if (result.MessageType == WebSocketMessageType.Close)
+                {
+                    await webSocket.CloseAsync(WebSocketCloseStatus.NormalClosure, string.Empty, cts.Token);
+                    isConnected = false;
+                    Debug.Log("[UnityMCP] WebSocket connection closed normally");
+                    break;
+                }
             }
         }
 
         private static async Task HandleMessage(string message)
         {
-            try
+            var data = JsonConvert.DeserializeObject<Dictionary<string, object>>(message);
+            switch (data["type"].ToString())
             {
-                var data = JsonConvert.DeserializeObject<Dictionary<string, object>>(message);
-                switch (data["type"].ToString())
-                {
-                    case "executeEditorCommand":
-                        await EditorCommandExecutor.ExecuteEditorCommand(webSocket, cts.Token, data["data"].ToString());
-                        break;
-                    case "getEditorState":
-                        await editorStateReporter.SendEditorState(webSocket, cts.Token);
-                        break;
-                }
-            }
-            catch (Exception e)
-            {
-                Debug.LogError($"Error handling message: {e.Message}");
+                case "executeEditorCommand":
+                    await EditorCommandExecutor.ExecuteEditorCommand(webSocket, cts.Token, data["data"].ToString());
+                    break;
+                case "getEditorState":
+                    await editorStateReporter.SendEditorState(webSocket, cts.Token);
+                    break;
             }
         }
     }

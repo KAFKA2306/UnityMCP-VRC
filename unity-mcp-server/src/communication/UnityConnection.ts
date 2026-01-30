@@ -35,17 +35,9 @@ export class UnityConnection {
       this.connection = ws;
 
       ws.on("message", (data: Buffer) => {
-        try {
-          const message = JSON.parse(data.toString());
-          console.error("[Unity MCP] Received message:", message.type);
-          this.handleUnityMessage(message);
-        } catch (error) {
-          console.error("[Unity MCP] Error handling message:", error);
-        }
-      });
-
-      ws.on("error", (error) => {
-        console.error("[Unity MCP] WebSocket error:", error);
+        const message = JSON.parse(data.toString());
+        console.error("[Unity MCP] Received message:", message.type);
+        this.handleUnityMessage(message);
       });
 
       ws.on("close", () => {
@@ -106,7 +98,7 @@ export class UnityConnection {
     }
   }
 
-  public async waitForConnection(timeoutMs: number = 60000): Promise<boolean> {
+  public async waitForConnection(): Promise<boolean> {
     if (this.connection) return true;
 
     return new Promise<boolean>((resolve) => {

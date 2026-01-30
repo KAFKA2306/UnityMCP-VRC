@@ -28,71 +28,32 @@ namespace UnityMCP.Editor
 
             Application.logMessageReceived += LogHandler;
 
-            try
+            var commandObj = JsonConvert.DeserializeObject<EditorCommandData>(commandData);
+            var code = commandObj.code;
+
+            Debug.Log("[UnityMCP] Executing code...");
+            
+            var result = CompileAndExecute(code);
+
+            Debug.Log("[UnityMCP] Code executed");
+
+            var resultMessage = JsonConvert.SerializeObject(new
             {
-                var commandObj = JsonConvert.DeserializeObject<EditorCommandData>(commandData);
-                var code = commandObj.code;
-
-                Debug.Log("[UnityMCP] Executing code...");
-                try
+                type = "commandResult",
+                data = new
                 {
-                    var result = CompileAndExecute(code);
-
-                    Debug.Log("[UnityMCP] Code executed");
-
-                    var resultMessage = JsonConvert.SerializeObject(new
-                    {
-                        type = "commandResult",
-                        data = new
-                        {
-                            result = result,
-                            logs = logs,
-                            errors = errors,
-                            warnings = warnings,
-                            executionSuccess = true
-                        }
-                    });
-
-                    var buffer = Encoding.UTF8.GetBytes(resultMessage);
-                    await webSocket.SendAsync(new ArraySegment<byte>(buffer), WebSocketMessageType.Text, true, cancellationToken);
+                    result = result,
+                    logs = logs,
+                    errors = errors,
+                    warnings = warnings,
+                    executionSuccess = true
                 }
-                catch (Exception e)
-                {
-                    throw new Exception($"Failed to execute command: {e.Message}", e);
-                }
-            }
-            catch (Exception e)
-            {
-                var firstStackLine = e.StackTrace?.Split('\n')?.FirstOrDefault() ?? "";
+            });
 
-                var error = $"[UnityMCP] Failed to execute editor command: {e.Message}\n{firstStackLine}";
-                Debug.LogError(error);
-
-                var errorMessage = JsonConvert.SerializeObject(new
-                {
-                    type = "commandResult",
-                    data = new
-                    {
-                        result = (object)null,
-                        logs = logs,
-                        errors = new List<string>(errors) { error },
-                        warnings = warnings,
-                        executionSuccess = false,
-                        errorDetails = new
-                        {
-                            message = e.Message,
-                            stackTrace = firstStackLine,
-                            type = e.GetType().Name
-                        }
-                    }
-                });
-                var buffer = Encoding.UTF8.GetBytes(errorMessage);
-                await webSocket.SendAsync(new ArraySegment<byte>(buffer), WebSocketMessageType.Text, true, cancellationToken);
-            }
-            finally
-            {
-                Application.logMessageReceived -= LogHandler;
-            }
+            var buffer = Encoding.UTF8.GetBytes(resultMessage);
+            await webSocket.SendAsync(new ArraySegment<byte>(buffer), WebSocketMessageType.Text, true, cancellationToken);
+            
+            Application.logMessageReceived -= LogHandler;
 
             void LogHandler(string message, string stackTrace, LogType type)
             {
@@ -137,78 +98,64 @@ namespace UnityMCP.Editor
 
             void AddAssemblyByName(string name)
             {
-                try
+                var assembly = AppDomain.CurrentDomain.GetAssemblies()
+                    .FirstOrDefault(a => a.GetName().Name == name);
+                if (assembly != null)
                 {
-                    var assembly = AppDomain.CurrentDomain.GetAssemblies()
-                        .FirstOrDefault(a => a.GetName().Name == name);
-                    if (assembly != null)
-                    {
-                        AddAssemblyReference(assembly.Location);
-                    }
-                }
-                catch (Exception e)
-                {
-                    Debug.LogWarning($"[UnityMCP] Failed to add assembly {name}: {e.Message}");
+                    AddAssemblyReference(assembly.Location);
                 }
             }
 
-            try
+            options.CoreAssemblyFileName = typeof(object).Assembly.Location;
+
+            AddAssemblyReference(typeof(UnityEngine.Object).Assembly.Location);
+            AddAssemblyReference(typeof(UnityEditor.Editor).Assembly.Location);
+
+            AddAssemblyReference(typeof(System.Linq.Enumerable).Assembly.Location);
+            AddAssemblyReference(typeof(object).Assembly.Location);
+
+            AddAssemblyReference(typeof(UnityMCP.Editor.EditorCommandExecutor).Assembly.Location);
+
+            var netstandardAssembly = AppDomain.CurrentDomain.GetAssemblies()
+                .FirstOrDefault(a => a.GetName().Name == "netstandard");
+            if (netstandardAssembly != null)
             {
-                options.CoreAssemblyFileName = typeof(object).Assembly.Location;
-
-                AddAssemblyReference(typeof(UnityEngine.Object).Assembly.Location);
-                AddAssemblyReference(typeof(UnityEditor.Editor).Assembly.Location);
-
-                AddAssemblyReference(typeof(System.Linq.Enumerable).Assembly.Location);
-                AddAssemblyReference(typeof(object).Assembly.Location);
-
-                AddAssemblyReference(typeof(UnityMCP.Editor.EditorCommandExecutor).Assembly.Location);
-
-                var netstandardAssembly = AppDomain.CurrentDomain.GetAssemblies()
-                    .FirstOrDefault(a => a.GetName().Name == "netstandard");
-                if (netstandardAssembly != null)
-                {
-                    AddAssemblyReference(netstandardAssembly.Location);
-                }
-
-                var commonModules = new[] {
-                    "UnityEngine.AnimationModule",
-                    "UnityEngine.CoreModule",
-                    "UnityEngine.IMGUIModule",
-                    "UnityEngine.PhysicsModule",
-                    "UnityEngine.TerrainModule",
-                    "UnityEngine.TextRenderingModule",
-                    "UnityEngine.UIModule",
-                    "Unity.TextMeshPro",
-                    "Unity.TextMeshPro.Editor"
-                };
-
-                foreach (var moduleName in commonModules)
-                {
-                    AddAssemblyByName(moduleName);
-                }
-
-                var vrchatAssemblies = new[] {
-                    "VRC.Udon",
-                    "VRC.Udon.Common",
-                    "VRC.Udon.Editor",
-                    "VRC.Udon.Serialization.OdinSerializer",
-                    "VRC.Udon.VM",
-                    "VRC.Udon.Wrapper",
-                    "UdonSharp.Editor",
-                    "UdonSharp.Runtime",
-                    "VRCSDK3",
-                    "VRCSDKBase",
-                };
-
-                foreach (var assemblyName in vrchatAssemblies)
-                {
-                    AddAssemblyByName(assemblyName);
-                }
+                AddAssemblyReference(netstandardAssembly.Location);
             }
-            catch (Exception e)
+
+            var commonModules = new[] {
+                "UnityEngine.AnimationModule",
+                "UnityEngine.CoreModule",
+                "UnityEngine.IMGUIModule",
+                "UnityEngine.PhysicsModule",
+                "UnityEngine.TerrainModule",
+                "UnityEngine.TextRenderingModule",
+                "UnityEngine.UIModule",
+                "Unity.TextMeshPro",
+                "Unity.TextMeshPro.Editor"
+            };
+
+            foreach (var moduleName in commonModules)
             {
-                Debug.LogWarning($"[UnityMCP] Assembly reference setup issue: {e.Message}");
+                AddAssemblyByName(moduleName);
+            }
+
+            var vrchatAssemblies = new[] {
+                "VRC.Udon",
+                "VRC.Udon.Common",
+                "VRC.Udon.Editor",
+                "VRC.Udon.Serialization.OdinSerializer",
+                "VRC.Udon.VM",
+                "VRC.Udon.Wrapper",
+                "UdonSharp.Editor",
+                "UdonSharp.Runtime",
+                "VRCSDK3",
+                "VRCSDKBase",
+            };
+
+            foreach (var assemblyName in vrchatAssemblies)
+            {
+                AddAssemblyByName(assemblyName);
             }
 
             using (var provider = new Microsoft.CSharp.CSharpCodeProvider())

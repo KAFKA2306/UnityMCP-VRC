@@ -14,19 +14,22 @@ namespace UnityMCP.VRChatUtils
         {
             if (string.IsNullOrEmpty(scriptPath) || !scriptPath.EndsWith(".cs"))
             {
-                ThrowAndLog("Invalid script path: " + scriptPath);
+                Debug.LogError("Invalid script path: " + scriptPath);
+                return string.Empty;
             }
 
             string scriptGuid = AssetDatabase.AssetPathToGUID(scriptPath);
             if (string.IsNullOrEmpty(scriptGuid))
             {
-                ThrowAndLog("Could not find GUID for script at path: " + scriptPath);
+                Debug.LogError("Could not find GUID for script at path: " + scriptPath);
+                return string.Empty;
             }
 
             string udonSharpProgramAssetGuid = GetUdonSharpProgramAssetGuid();
             if (string.IsNullOrEmpty(udonSharpProgramAssetGuid))
             {
-                ThrowAndLog("UdonSharpProgramAsset GUID not found. Please ensure UdonSharp is installed correctly.");
+                Debug.LogError("UdonSharpProgramAsset GUID not found. Please ensure UdonSharp is installed correctly.");
+                return string.Empty;
             }
 
             string scriptName = Path.GetFileNameWithoutExtension(scriptPath);
@@ -77,12 +80,6 @@ MonoBehaviour:
             }
 
             return string.Empty;
-        }
-
-        private static void ThrowAndLog(string message)
-        {
-            Debug.LogError(message);
-            throw new Exception(message);
         }
     }
 }
