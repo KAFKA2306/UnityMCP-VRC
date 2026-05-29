@@ -188,9 +188,11 @@ namespace UnityMCP.Editor
                     "UnityEngine.AnimationModule",
                     "UnityEngine.CoreModule",
                     "UnityEngine.IMGUIModule",
+                    "UnityEngine.ParticleSystemModule",
                     "UnityEngine.PhysicsModule",
                     "UnityEngine.TerrainModule",
                     "UnityEngine.TextRenderingModule",
+                    "UnityEngine.TerrainPhysicsModule",
                     "UnityEngine.UIModule",
                     "Unity.TextMeshPro",
                     "Unity.TextMeshPro.Editor"
