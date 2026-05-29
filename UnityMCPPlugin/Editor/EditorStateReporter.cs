@@ -1,13 +1,9 @@
 using UnityEngine;
 using UnityEditor;
 using System;
-using System.Net.WebSockets;
-using System.Text;
-using System.Threading;
 using System.Threading.Tasks;
 using System.Collections.Generic;
 using System.Linq;
-using Newtonsoft.Json;
 
 namespace UnityMCP.Editor
 {
@@ -30,43 +26,22 @@ namespace UnityMCP.Editor
             return capped;
         }
 
-        // New method to send editor state
-        public async Task SendEditorState(ClientWebSocket webSocket, CancellationToken cancellationToken)
+        // Gathers editor state and returns it as the payload for an "editorState" response. The
+        // connection layer serializes it (echoing the request id) back to the requesting client.
+        // Gathering touches Unity APIs, so it runs on the main thread via RunOnMainThread, which
+        // defers while the Editor is compiling and only times out if the Editor stays unfocused
+        // past its limit. On failure we return an { error } payload so the client fails fast with
+        // a useful message rather than hanging.
+        public async Task<object> GetEditorStateData()
         {
             try
             {
-                if (webSocket == null || webSocket.State != WebSocketState.Open)
-                {
-                    Debug.LogWarning("[UnityMCP] Cannot send editor state - connection closed");
-                    return;
-                }
-
-                object state;
-                try
-                {
-                    // Gathering editor state touches Unity APIs, so it must run on the main thread.
-                    // RunOnMainThread waits for the Editor to tick (deferring while it compiles) and
-                    // only errors if the Editor stays unfocused past the timeout.
-                    state = await EditorUtilities.RunOnMainThread(() => GetEditorState()).ConfigureAwait(false);
-                }
-                catch (Exception ex)
-                {
-                    Debug.LogWarning($"[UnityMCP] Could not get editor state: {ex.Message}");
-                    state = new { error = ex.Message };
-                }
-
-                var message = JsonConvert.SerializeObject(new
-                {
-                    type = "editorState",
-                    data = state
-                });
-                var buffer = Encoding.UTF8.GetBytes(message);
-                await webSocket.SendAsync(new ArraySegment<byte>(buffer), WebSocketMessageType.Text, true, cancellationToken).ConfigureAwait(false);
-                Debug.Log("[UnityMCP] Sent editor state upon request");
+                return await EditorUtilities.RunOnMainThread(() => GetEditorState()).ConfigureAwait(false);
             }
-            catch (Exception e)
+            catch (Exception ex)
             {
-                Debug.LogError($"[UnityMCP] Error sending editor state: {e.Message}");
+                Debug.LogWarning($"[UnityMCP] Could not get editor state: {ex.Message}");
+                return new { error = ex.Message };
             }
         }
 

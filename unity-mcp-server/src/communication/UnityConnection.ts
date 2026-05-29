@@ -1,167 +1,204 @@
-import { WebSocket, WebSocketServer } from "ws";
-import {
-  CommandResult,
-  resolveCommandResult,
-  rejectPendingCommandResult,
-} from "../tools/ExecuteEditorCommandTool.js";
+import { WebSocket } from "ws";
 import { LogEntry } from "../tools/index.js";
-import {
-  resolveUnityEditorState,
-  rejectPendingEditorState,
-  UnityEditorState,
-} from "../tools/GetEditorStateTool.js";
 
+interface PendingRequest {
+  resolve: (value: any) => void;
+  reject: (reason: any) => void;
+  timer: NodeJS.Timeout;
+}
+
+// The Unity Editor now HOSTS the WebSocket server; this MCP server connects to it as a client.
+// (Previously this was the server and Unity dialed in, which made multiple MCP servers fight
+// over port 8080 - only one won and the rest became unusable zombies.) As a client, any number
+// of MCP servers can connect to the one Editor. Each request we send carries a unique "id";
+// Unity echoes it back on its response so we can match the reply to the right in-flight call,
+// which also lets multiple requests be outstanding at once.
 export class UnityConnection {
-  private wsServer: WebSocketServer;
-  private connection: WebSocket | null = null;
+  private url: string;
+  private ws: WebSocket | null = null;
+  private connected = false;
+  private shuttingDown = false;
+  private reconnectTimer: NodeJS.Timeout | null = null;
+  private readonly reconnectIntervalMs = 3000;
+  private loggedConnectError = false;
 
   private logBuffer: LogEntry[] = [];
   private readonly maxLogBufferSize = 1000;
 
-  // Event callbacks
-  private onLogReceived: ((entry: LogEntry) => void) | null = null;
+  // In-flight requests keyed by id, resolved when Unity sends the matching response.
+  private pending = new Map<string, PendingRequest>();
+  private nextId = 1;
 
   constructor(port: number = 8080) {
-    this.wsServer = new WebSocketServer({ port });
-    this.setupWebSocket();
+    this.url = `ws://localhost:${port}`;
+    this.connect();
   }
 
-  private setupWebSocket() {
-    console.error("[Unity MCP] WebSocket server starting on port 8080");
+  private connect(): void {
+    if (this.shuttingDown) return;
 
-    this.wsServer.on("listening", () => {
-      console.error(
-        "[Unity MCP] WebSocket server is listening for connections",
+    const ws = new WebSocket(this.url);
+    this.ws = ws;
+
+    ws.on("open", () => {
+      this.connected = true;
+      this.loggedConnectError = false;
+      console.error(`[Unity MCP] Connected to Unity Editor at ${this.url}`);
+      if (this.reconnectTimer) {
+        clearTimeout(this.reconnectTimer);
+        this.reconnectTimer = null;
+      }
+    });
+
+    ws.on("message", (data: Buffer) => {
+      try {
+        const message = JSON.parse(data.toString());
+        this.handleUnityMessage(message);
+      } catch (error) {
+        console.error("[Unity MCP] Error parsing message:", error);
+      }
+    });
+
+    ws.on("error", (error: Error) => {
+      // "close" always follows "error", so reconnect is scheduled there. Log the first
+      // connect failure only, to avoid spamming stderr while Unity is starting up.
+      const msg = error.message || String(error);
+      const isRefused = msg.includes("ECONNREFUSED");
+      if (!isRefused || !this.loggedConnectError) {
+        console.error("[Unity MCP] WebSocket error:", msg);
+        if (isRefused) this.loggedConnectError = true;
+      }
+    });
+
+    ws.on("close", () => {
+      if (this.connected) {
+        console.error("[Unity MCP] Disconnected from Unity Editor");
+      }
+      this.connected = false;
+      this.ws = null;
+      // Fail any in-flight requests fast with a retry hint instead of letting them hang.
+      this.rejectPending(
+        new Error(
+          "Unity disconnected (likely recompiling or reloading its app domain, or the " +
+            "Editor is not running). The connection re-establishes automatically - retry in a moment.",
+        ),
       );
-    });
-
-    this.wsServer.on("error", (error) => {
-      console.error("[Unity MCP] WebSocket server error:", error);
-    });
-
-    this.wsServer.on("connection", (ws: WebSocket) => {
-      console.error("[Unity MCP] Unity Editor connected");
-      this.connection = ws;
-
-      ws.on("message", (data: Buffer) => {
-        try {
-          const message = JSON.parse(data.toString());
-          console.error("[Unity MCP] Received message:", message.type);
-          this.handleUnityMessage(message);
-        } catch (error) {
-          console.error("[Unity MCP] Error handling message:", error);
-        }
-      });
-
-      ws.on("error", (error) => {
-        console.error("[Unity MCP] WebSocket error:", error);
-        this.rejectPendingRequests(
-          new Error(
-            "Unity connection errored (likely recompiling or reloading). Retry in a moment.",
-          ),
-        );
-      });
-
-      ws.on("close", () => {
-        console.error("[Unity MCP] Unity Editor disconnected");
-        // Only clear if this is still the active socket - a stale socket closing
-        // after Unity has already reconnected must not null the new connection.
-        if (this.connection === ws) {
-          this.connection = null;
-        }
-        this.rejectPendingRequests(
-          new Error(
-            "Unity disconnected (likely recompiling or reloading its app domain). " +
-              "The connection re-establishes automatically - retry in a moment.",
-          ),
-        );
-      });
+      this.scheduleReconnect();
     });
   }
 
-  // Fail any in-flight tool requests when the connection drops, so they return a
-  // retry hint immediately instead of hanging until their timeout. Each reject is
-  // a no-op when nothing is pending, and idempotent across error+close. New
-  // request-bearing tools should add their reject here.
-  private rejectPendingRequests(reason: Error): void {
-    rejectPendingCommandResult(reason);
-    rejectPendingEditorState(reason);
+  private scheduleReconnect(): void {
+    if (this.shuttingDown || this.reconnectTimer) return;
+    this.reconnectTimer = setTimeout(() => {
+      this.reconnectTimer = null;
+      this.connect();
+    }, this.reconnectIntervalMs);
   }
 
-  private handleUnityMessage(message: any) {
-    switch (message.type) {
-      case "commandResult":
-        resolveCommandResult(message.data as CommandResult);
-        break;
+  private handleUnityMessage(message: any): void {
+    const { type, id, data } = message;
 
-      case "editorState":
-        resolveUnityEditorState(message.data as UnityEditorState);
-        break;
+    // Correlated response to one of our requests (commandResult / editorState).
+    if (id && this.pending.has(id)) {
+      const pending = this.pending.get(id)!;
+      clearTimeout(pending.timer);
+      this.pending.delete(id);
+      pending.resolve(data);
+      return;
+    }
 
+    switch (type) {
       case "log":
-        this.handleLogMessage(message.data);
-        if (this.onLogReceived) {
-          this.onLogReceived(message.data);
-        }
+        this.handleLogMessage(data);
+        break;
+
+      case "commandResult":
+      case "editorState":
+        // Response arrived with no matching pending request (already timed out / cleared).
         break;
 
       default:
-        console.error("[Unity MCP] Unknown message type:", message.type);
+        console.error("[Unity MCP] Unknown message type:", type);
     }
   }
 
-  private handleLogMessage(logEntry: LogEntry) {
-    // Add to buffer, removing oldest if at capacity
+  private handleLogMessage(logEntry: LogEntry): void {
     this.logBuffer.push(logEntry);
     if (this.logBuffer.length > this.maxLogBufferSize) {
       this.logBuffer.shift();
     }
   }
 
+  private rejectPending(reason: Error): void {
+    for (const pending of this.pending.values()) {
+      clearTimeout(pending.timer);
+      pending.reject(reason);
+    }
+    this.pending.clear();
+  }
+
   // Public API
+
   public isConnected(): boolean {
-    return this.connection !== null;
+    return (
+      this.connected && this.ws !== null && this.ws.readyState === WebSocket.OPEN
+    );
   }
 
   public getLogBuffer(): LogEntry[] {
     return [...this.logBuffer];
   }
 
-  public setOnLogReceived(callback: (entry: LogEntry) => void): void {
-    this.onLogReceived = callback;
-  }
+  // Send a request to Unity and resolve with the data from its correlated response.
+  public sendRequest(
+    type: string,
+    data: any,
+    timeoutMs: number = 60_000,
+  ): Promise<any> {
+    return new Promise((resolve, reject) => {
+      if (!this.isConnected()) {
+        reject(new Error("Unity Editor is not connected."));
+        return;
+      }
 
-  public sendMessage(type: string, data: any): void {
-    if (this.connection) {
-      this.connection.send(JSON.stringify({ type, data }));
-    } else {
-      console.error(
-        "[Unity MCP] Cannot send message: Unity Editor not connected",
-      );
-    }
-  }
+      const id = String(this.nextId++);
+      const timer = setTimeout(() => {
+        this.pending.delete(id);
+        reject(
+          new Error(
+            `Request "${type}" timed out after ${
+              timeoutMs / 1000
+            } seconds. The Unity Editor may be unfocused, compiling, or busy.`,
+          ),
+        );
+      }, timeoutMs);
 
-  public async waitForConnection(timeoutMs: number = 60000): Promise<boolean> {
-    if (this.connection) return true;
+      this.pending.set(id, { resolve, reject, timer });
 
-    return new Promise<boolean>((resolve) => {
-      const timeout = setTimeout(() => resolve(false), timeoutMs);
-
-      const connectionHandler = () => {
-        clearTimeout(timeout);
-        this.wsServer.off("connection", connectionHandler);
-        resolve(true);
-      };
-
-      this.wsServer.on("connection", connectionHandler);
+      try {
+        this.ws!.send(JSON.stringify({ type, id, data }));
+      } catch (error) {
+        clearTimeout(timer);
+        this.pending.delete(id);
+        reject(error);
+      }
     });
   }
 
   public close(): void {
-    if (this.connection) {
-      this.connection.close();
-      this.connection = null;
+    this.shuttingDown = true;
+    if (this.reconnectTimer) {
+      clearTimeout(this.reconnectTimer);
+      this.reconnectTimer = null;
     }
-    this.wsServer.close();
+    this.rejectPending(new Error("MCP server shutting down."));
+    if (this.ws) {
+      try {
+        this.ws.close();
+      } catch {
+        // ignore
+      }
+      this.ws = null;
+    }
   }
 }

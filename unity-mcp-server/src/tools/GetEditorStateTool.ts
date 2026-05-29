@@ -14,37 +14,6 @@ export interface UnityEditorState {
   error?: string;
 }
 
-export interface UnityEditorStateHandler {
-  resolve: (value: UnityEditorState) => void;
-  reject: (reason?: any) => void;
-}
-
-// Command state management
-let unityEditorStatePromise: UnityEditorStateHandler | null = null;
-let unityEditorStateTime: number | null = null;
-
-// New method to resolve the command result - called when results arrive from Unity
-export function resolveUnityEditorState(result: UnityEditorState): void {
-  if (unityEditorStatePromise) {
-    if (result.error) {
-      unityEditorStatePromise.reject(new Error(result.error));
-    } else {
-      unityEditorStatePromise.resolve(result);
-    }
-    unityEditorStatePromise = null;
-  }
-}
-
-// Reject an in-flight request - called when the Unity connection drops (e.g. a
-// domain reload) so the request fails fast with a retry hint instead of hanging
-// until the timeout. No-op if nothing is pending.
-export function rejectPendingEditorState(reason: Error): void {
-  if (unityEditorStatePromise) {
-    unityEditorStatePromise.reject(reason);
-    unityEditorStatePromise = null;
-  }
-}
-
 export class GetEditorStateTool implements Tool {
   getDefinition(): ToolDefinition {
     return {
@@ -98,33 +67,20 @@ export class GetEditorStateTool implements Tool {
     }
 
     try {
-      // Clear previous logs and set command start time
-      const startLogIndex = context.logBuffer.length;
-      unityEditorStateTime = Date.now();
-
-      // Send command to Unity to get editor state
-      context.unityConnection!.sendMessage("getEditorState", {});
-
-      // Wait for result with timeout handling
+      // Send command to Unity and await its correlated response (matched by request id).
       const timeoutMs = 60_000;
-      const editorState = await Promise.race([
-        new Promise<UnityEditorState>((resolve, reject) => {
-          unityEditorStatePromise = { resolve, reject };
-        }),
-        new Promise<never>((_, reject) =>
-          setTimeout(
-            () =>
-              reject(
-                new Error(
-                  `Getting editor state timed out after ${
-                    timeoutMs / 1000
-                  } seconds. This may indicate an issue with the Unity Editor.`,
-                ),
-              ),
-            timeoutMs,
-          ),
-        ),
-      ]);
+      const editorState: UnityEditorState =
+        await context.unityConnection.sendRequest(
+          "getEditorState",
+          {},
+          timeoutMs,
+        );
+
+      // Unity returns an { error } payload if it couldn't gather state (e.g. the Editor
+      // stayed unfocused past the main-thread timeout) - surface it as a failure.
+      if (editorState?.error) {
+        throw new Error(editorState.error);
+      }
 
       // Process the response based on format
       let responseData: any;

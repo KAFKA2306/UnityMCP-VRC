@@ -1,15 +1,12 @@
 using UnityEngine;
 using UnityEditor;
 using System;
-using System.Net.WebSockets;
-using System.Text;
-using System.Threading;
 using System.Collections.Generic;
 using System.Linq;
+using System.Threading.Tasks;
 using Newtonsoft.Json;
 using Microsoft.CSharp;
 using System.CodeDom.Compiler;
-using System.Threading.Tasks;
 
 namespace UnityMCP.Editor
 {
@@ -20,62 +17,67 @@ namespace UnityMCP.Editor
             public string code { get; set; }
         }
 
-        public static async Task ExecuteEditorCommand(ClientWebSocket webSocket, CancellationToken cancellationToken, string commandData)
+        // Compiles and runs the supplied C# on Unity's main thread and returns the result
+        // payload ({ result, logs, errors, warnings, executionSuccess, [errorDetails] }). The
+        // connection layer serializes this into a "commandResult" message (echoing the request
+        // id) and sends it back to the requesting client. Running on the main thread is required
+        // because the code touches Unity APIs; RunOnMainThread also defers while the Editor is
+        // compiling, so the snippet executes against stable post-compile state.
+        public static Task<object> ExecuteAndGetResult(string commandData)
         {
-            var logs = new List<string>();
-            var errors = new List<string>();
-            var warnings = new List<string>();
+            var commandObj = JsonConvert.DeserializeObject<EditorCommandData>(commandData);
+            var code = commandObj?.code;
 
-            Application.logMessageReceived += LogHandler;
-
-            try
+            return EditorUtilities.RunOnMainThread<object>(() =>
             {
-                var commandObj = JsonConvert.DeserializeObject<EditorCommandData>(commandData);
-                var code = commandObj.code;
+                var logs = new List<string>();
+                var errors = new List<string>();
+                var warnings = new List<string>();
 
-                Debug.Log($"[UnityMCP] Executing code...");
-                // Execute the code directly in the Editor context
+                void LogHandler(string message, string stackTrace, LogType type)
+                {
+                    switch (type)
+                    {
+                        case LogType.Log:
+                            logs.Add(message);
+                            break;
+                        case LogType.Warning:
+                            warnings.Add(message);
+                            break;
+                        case LogType.Error:
+                        case LogType.Exception:
+                            var stackLine = stackTrace?.Split('\n')?.FirstOrDefault() ?? "";
+                            errors.Add($"{message}\n{stackLine}");
+                            break;
+                    }
+                }
+
+                // Capture logs for the duration of this command only. Because the main-thread
+                // queue drains sequentially, commands never execute concurrently, so this scopes
+                // cleanly to the single snippet.
+                Application.logMessageReceived += LogHandler;
                 try
                 {
-                    // Execute the provided code
+                    Debug.Log("[UnityMCP] Executing code...");
                     var result = CompileAndExecute(code);
+                    Debug.Log("[UnityMCP] Code executed");
 
-                    Debug.Log($"[UnityMCP] Code executed");
-
-                    // Send back detailed execution results
-                    var resultMessage = JsonConvert.SerializeObject(new
+                    return (object)new
                     {
-                        type = "commandResult",
-                        data = new
-                        {
-                            result = result,
-                            logs = logs,
-                            errors = errors,
-                            warnings = warnings,
-                            executionSuccess = true
-                        }
-                    });
-
-                    var buffer = Encoding.UTF8.GetBytes(resultMessage);
-                    await webSocket.SendAsync(new ArraySegment<byte>(buffer), WebSocketMessageType.Text, true, cancellationToken);
+                        result = result,
+                        logs = logs,
+                        errors = errors,
+                        warnings = warnings,
+                        executionSuccess = true
+                    };
                 }
                 catch (Exception e)
                 {
-                    throw new Exception($"Failed to execute command: {e.Message}", e);
-                }
-            }
-            catch (Exception e)
-            {
-                var firstStackLine = e.StackTrace?.Split('\n')?.FirstOrDefault() ?? "";
+                    var firstStackLine = e.StackTrace?.Split('\n')?.FirstOrDefault() ?? "";
+                    var error = $"[UnityMCP] Failed to execute editor command: {e.Message}\n{firstStackLine}";
+                    Debug.LogError(error);
 
-                var error = $"[UnityMCP] Failed to execute editor command: {e.Message}\n{firstStackLine}";
-                Debug.LogError(error);
-
-                // Send back error information
-                var errorMessage = JsonConvert.SerializeObject(new
-                {
-                    type = "commandResult",
-                    data = new
+                    return (object)new
                     {
                         result = (object)null,
                         logs = logs,
@@ -88,40 +90,22 @@ namespace UnityMCP.Editor
                             stackTrace = firstStackLine,
                             type = e.GetType().Name
                         }
-                    }
-                });
-                var buffer = Encoding.UTF8.GetBytes(errorMessage);
-                await webSocket.SendAsync(new ArraySegment<byte>(buffer), WebSocketMessageType.Text, true, cancellationToken);
-            }
-            finally
-            {
-                Application.logMessageReceived -= LogHandler;
-            }
-
-            void LogHandler(string message, string stackTrace, LogType type)
-            {
-                switch (type)
-                {
-                    case LogType.Log:
-                        logs.Add(message);
-                        break;
-                    case LogType.Warning:
-                        warnings.Add(message);
-                        break;
-                    case LogType.Error:
-                    case LogType.Exception:
-                        var firstStackLine = stackTrace?.Split('\n')?.FirstOrDefault() ?? "";
-                        errors.Add($"{message}\n{firstStackLine}");
-                        break;
+                    };
                 }
-            }
+                finally
+                {
+                    Application.logMessageReceived -= LogHandler;
+                }
+            });
         }
 
 
         public static object CompileAndExecute(string code)
         {
-            // Wait for any ongoing Unity compilation to finish first
-            EditorUtilities.WaitForUnityCompilation();
+            // No blocking wait-for-compile here. Callers route through
+            // EditorUtilities.RunOnMainThread, whose queue already defers while the Editor is
+            // compiling, so by the time this runs the domain is stable. (The Script Tester window
+            // calls this directly from a user click, which is also never mid-compile.)
 
             // Use Mono's built-in compiler
             var options = new System.CodeDom.Compiler.CompilerParameters

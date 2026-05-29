@@ -18,33 +18,6 @@ export interface CommandResult {
   };
 }
 
-export interface CommandResultHandler {
-  resolve: (value: CommandResult) => void;
-  reject: (reason?: any) => void;
-}
-
-// Command state management
-let commandResultPromise: CommandResultHandler | null = null;
-let commandStartTime: number | null = null;
-
-// New method to resolve the command result - called when results arrive from Unity
-export function resolveCommandResult(result: CommandResult): void {
-  if (commandResultPromise) {
-    commandResultPromise.resolve(result);
-    commandResultPromise = null;
-  }
-}
-
-// Reject an in-flight command - called when the Unity connection drops (e.g. a
-// domain reload) so the request fails fast with a retry hint instead of hanging
-// until the timeout. No-op if nothing is pending.
-export function rejectPendingCommandResult(reason: Error): void {
-  if (commandResultPromise) {
-    commandResultPromise.reject(reason);
-    commandResultPromise = null;
-  }
-}
-
 export class ExecuteEditorCommandTool implements Tool {
   getDefinition(): ToolDefinition {
     return {
@@ -146,33 +119,15 @@ public class EditorCommand
     try {
       // Clear previous logs and set command start time
       const startLogIndex = context.logBuffer.length;
-      commandStartTime = Date.now();
+      const commandStartTime = Date.now();
 
-      // Send command to Unity
-      context.unityConnection!.sendMessage("executeEditorCommand", {
-        code: args.code,
-      });
-
-      // Wait for result with enhanced timeout handling
+      // Send command to Unity and await its correlated response (matched by request id).
       const timeoutMs = 60_000;
-      const result = await Promise.race([
-        new Promise((resolve, reject) => {
-          commandResultPromise = { resolve, reject };
-        }),
-        new Promise((_, reject) =>
-          setTimeout(
-            () =>
-              reject(
-                new Error(
-                  `Command execution timed out after ${
-                    timeoutMs / 1000
-                  } seconds. This may indicate a long-running operation or an issue with the Unity Editor.`,
-                ),
-              ),
-            timeoutMs,
-          ),
-        ),
-      ]);
+      const result = await context.unityConnection.sendRequest(
+        "executeEditorCommand",
+        { code: args.code },
+        timeoutMs,
+      );
 
       // Get logs that occurred during command execution
       const commandLogs = context.logBuffer
@@ -180,7 +135,7 @@ public class EditorCommand
         .filter((log) => log.message.includes("[UnityMCP]"));
 
       // Calculate execution time
-      const executionTime = Date.now() - (commandStartTime || 0);
+      const executionTime = Date.now() - commandStartTime;
 
       return {
         content: [

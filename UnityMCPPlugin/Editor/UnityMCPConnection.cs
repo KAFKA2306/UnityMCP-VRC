@@ -1,33 +1,50 @@
 using UnityEngine;
 using UnityEditor;
 using System;
-using System.Net.WebSockets;
-using System.Text;
+using System.Net;
+using System.Net.Sockets;
 using System.Threading;
 using System.Threading.Tasks;
 using System.Collections.Generic;
-using System.Linq;
 using Newtonsoft.Json;
-using Microsoft.CSharp;
-using System.CodeDom.Compiler;
 
 namespace UnityMCP.Editor
 {
+    // Unity HOSTS the WebSocket server; each MCP server process connects to it as a client.
+    //
+    // Previously this was reversed (Unity dialed out to a server each Claude session launched),
+    // which made the MCP servers fight over a fixed port 8080 - only the first bound it and the
+    // rest lingered as zombies that could never reach Unity. Inverting it lets any number of MCP
+    // servers connect to the one Editor at once. Each request carries an "id"; responses echo it
+    // back on the originating socket so a client matches a reply to its own in-flight call.
+    //
+    // This class owns the server lifecycle (bind/accept/teardown), the connected-client list,
+    // message dispatch, and log broadcast. The WebSocket wire protocol itself lives in
+    // ClientConnection (handshake + RFC 6455 framing).
     [InitializeOnLoad]
     public class UnityMCPConnection
     {
-        private static ClientWebSocket webSocket;
-        private static bool isConnected = false;
-        private static readonly Uri serverUri = new Uri("ws://localhost:8080");
+        private const int Port = 8080;
+
+        private static TcpListener listener;
+        private static bool isListening;
+        private static CancellationTokenSource serverCts;
+        private static readonly List<ClientConnection> clients = new List<ClientConnection>();
+
         private static string lastErrorMessage = "";
         private static readonly Queue<LogEntry> logBuffer = new Queue<LogEntry>();
         private static readonly int maxLogBufferSize = 1000;
         private static bool isLoggingEnabled = true;
-        private static EditorStateReporter editorStateReporter;
+        private static readonly EditorStateReporter editorStateReporter = new EditorStateReporter();
 
-        // Public properties for the debug window
-        public static bool IsConnected => isConnected;
-        public static Uri ServerUri => serverUri;
+        // Public properties for the debug window.
+        // IsListening is the authoritative signal: the server owns the port and is accepting
+        // connections. False means the bind failed (e.g. another process holds the port) - see
+        // LastErrorMessage. IsConnected/ConnectedClientCount report how many clients are attached.
+        public static bool IsListening => isListening;
+        public static bool IsConnected { get { lock (clients) { return clients.Count > 0; } } }
+        public static int ConnectedClientCount { get { lock (clients) { return clients.Count; } } }
+        public static Uri ServerUri => new Uri($"ws://localhost:{Port}/");
         public static string LastErrorMessage => lastErrorMessage;
         public static bool IsLoggingEnabled
         {
@@ -54,50 +71,217 @@ namespace UnityMCP.Editor
             public DateTime Timestamp { get; set; }
         }
 
-        // Public method to manually retry connection
+        // Manual restart from the debug window (e.g. after a port-bind failure is resolved).
         public static void RetryConnection()
         {
-            Debug.Log("[UnityMCP] Manually retrying connection...");
-            ConnectToServer();
+            Debug.Log("[UnityMCP] Restarting MCP server...");
+            StopServer();
+            StartServer();
         }
-        private static readonly CancellationTokenSource cts = new CancellationTokenSource();
 
-        // Constructor called on editor startup
+        // Constructor called on editor startup (and again after every domain reload).
         static UnityMCPConnection()
         {
-            // Start capturing logs before anything else
             Application.logMessageReceived += HandleLogMessage;
             isLoggingEnabled = true;
 
             Debug.Log("[UnityMCP] Plugin initialized");
             EditorApplication.delayCall += () =>
             {
-                Debug.Log("[UnityMCP] Starting initial connection");
-                ConnectToServer();
+                Debug.Log("[UnityMCP] Starting MCP WebSocket server");
+                StartServer();
             };
-            EditorApplication.update += Update;
             AssemblyReloadEvents.beforeAssemblyReload += OnBeforeAssemblyReload;
         }
 
-        // A domain reload (triggered by recompiles, including execute_editor_command
-        // edits) wipes all managed state here - this socket, EditorUtilities' main-thread
-        // queue, and any in-flight requests. Close the socket now so the MCP server learns
-        // immediately and can fail pending requests with a "retry" instead of waiting out
-        // its timeout. A graceful CloseAsync can't reliably finish before the domain dies,
-        // so Abort() gives a prompt, synchronous teardown; the plugin reconnects after the
-        // reload via Update()'s reconnect loop.
+        // A domain reload (recompiles, including execute_editor_command edits) wipes all managed
+        // state here - the listener, every client socket, and EditorUtilities' main-thread queue.
+        // Tear the server down synchronously now so connected MCP clients see the close
+        // immediately, fail their in-flight requests with a "retry" instead of waiting out a
+        // timeout, and reconnect once the server restarts after the reload (this static
+        // constructor runs again in the new domain).
         private static void OnBeforeAssemblyReload()
         {
+            StopServer();
+        }
+
+        private static void StartServer()
+        {
+            if (isListening) return;
+
             try
             {
-                isConnected = false;
-                webSocket?.Abort();
-                webSocket?.Dispose();
+                serverCts = new CancellationTokenSource();
+                listener = new TcpListener(IPAddress.IPv6Any, Port);
+                // Accept both IPv4 (127.0.0.1) and IPv6 (::1) clients. If the runtime refuses
+                // dual-mode we still listen on IPv6, which is what "localhost" resolves to here.
+                try { listener.Server.DualMode = true; } catch { }
+                listener.Start();
+                isListening = true;
+                lastErrorMessage = "";
+                Debug.Log($"[UnityMCP] WebSocket server listening on ws://localhost:{Port}/");
+                _ = AcceptLoop(serverCts.Token);
             }
             catch (Exception e)
             {
-                Debug.LogWarning($"[UnityMCP] Error closing socket before assembly reload: {e.Message}");
+                isListening = false;
+                lastErrorMessage = $"[UnityMCP] Failed to start server on port {Port}: {e.Message}";
+                Debug.LogError(lastErrorMessage);
+                listener = null;
             }
+        }
+
+        private static void StopServer()
+        {
+            isListening = false;
+            try { serverCts?.Cancel(); } catch { }
+
+            // Close outstanding client sockets so their receive loops unwind promptly.
+            lock (clients)
+            {
+                foreach (var c in clients)
+                {
+                    try { c.Close(); } catch { }
+                }
+                clients.Clear();
+            }
+
+            try { listener?.Stop(); } catch { }
+            listener = null;
+        }
+
+        private static async Task AcceptLoop(CancellationToken token)
+        {
+            while (!token.IsCancellationRequested && isListening)
+            {
+                TcpClient tcp;
+                try
+                {
+                    tcp = await listener.AcceptTcpClientAsync().ConfigureAwait(false);
+                }
+                catch (Exception)
+                {
+                    break; // listener stopped/disposed - exit quietly
+                }
+
+                if (token.IsCancellationRequested)
+                {
+                    try { tcp.Close(); } catch { }
+                    break;
+                }
+
+                _ = HandleClient(tcp, token);
+            }
+        }
+
+        private static async Task HandleClient(TcpClient tcp, CancellationToken token)
+        {
+            ClientConnection client = null;
+            try
+            {
+                client = await ClientConnection.AcceptAsync(tcp, token).ConfigureAwait(false);
+                if (client == null)
+                {
+                    Debug.LogWarning("[UnityMCP] WebSocket handshake failed (not a valid upgrade request)");
+                    return;
+                }
+
+                lock (clients) clients.Add(client);
+                Debug.Log($"[UnityMCP] MCP client connected ({ConnectedClientCount} total)");
+
+                while (!token.IsCancellationRequested)
+                {
+                    string message;
+                    try
+                    {
+                        message = await client.ReceiveMessageAsync(token).ConfigureAwait(false);
+                    }
+                    catch (Exception)
+                    {
+                        break; // connection dropped
+                    }
+
+                    if (message == null) break; // closed
+                    await HandleMessage(client, message, token).ConfigureAwait(false);
+                }
+            }
+            catch (Exception e)
+            {
+                Debug.LogError($"[UnityMCP] Client error: {e.Message}");
+            }
+            finally
+            {
+                if (client != null)
+                {
+                    lock (clients) clients.Remove(client);
+                    client.Close();
+                    Debug.Log($"[UnityMCP] MCP client disconnected ({ConnectedClientCount} remaining)");
+                }
+                else
+                {
+                    try { tcp.Close(); } catch { }
+                }
+            }
+        }
+
+        private static async Task HandleMessage(ClientConnection client, string message, CancellationToken token)
+        {
+            string id = null;
+            string type = null;
+            try
+            {
+                var data = JsonConvert.DeserializeObject<Dictionary<string, object>>(message);
+                type = data.ContainsKey("type") ? data["type"]?.ToString() : null;
+                id = data.ContainsKey("id") ? data["id"]?.ToString() : null;
+                var payload = data.ContainsKey("data") && data["data"] != null ? data["data"].ToString() : "{}";
+
+                switch (type)
+                {
+                    case "executeEditorCommand":
+                    {
+                        object resultData;
+                        try
+                        {
+                            resultData = await EditorCommandExecutor.ExecuteAndGetResult(payload).ConfigureAwait(false);
+                        }
+                        catch (Exception e)
+                        {
+                            // e.g. RunOnMainThread timed out (Editor unfocused). Return a failed
+                            // result so the client reports it instead of waiting out its timeout.
+                            resultData = new
+                            {
+                                result = (object)null,
+                                logs = new List<string>(),
+                                errors = new List<string> { e.Message },
+                                warnings = new List<string>(),
+                                executionSuccess = false,
+                                errorDetails = new { message = e.Message, stackTrace = "", type = e.GetType().Name }
+                            };
+                        }
+                        await SendResponse(client, "commandResult", id, resultData, token).ConfigureAwait(false);
+                        break;
+                    }
+                    case "getEditorState":
+                    {
+                        var stateData = await editorStateReporter.GetEditorStateData().ConfigureAwait(false);
+                        await SendResponse(client, "editorState", id, stateData, token).ConfigureAwait(false);
+                        break;
+                    }
+                    default:
+                        Debug.LogWarning($"[UnityMCP] Unknown message type: {type}");
+                        break;
+                }
+            }
+            catch (Exception e)
+            {
+                Debug.LogError($"[UnityMCP] Error handling message: {e.Message}");
+            }
+        }
+
+        private static Task SendResponse(ClientConnection client, string type, string id, object data, CancellationToken token)
+        {
+            var message = JsonConvert.SerializeObject(new { type, id, data });
+            return client.SendTextAsync(message, token);
         }
 
         private static void HandleLogMessage(string message, string stackTrace, LogType type)
@@ -121,179 +305,46 @@ namespace UnityMCP.Editor
                 }
             }
 
-            // Send log to server if connected
-            if (isConnected && webSocket?.State == WebSocketState.Open)
-            {
-                SendLogToServer(logEntry);
-            }
+            BroadcastLog(logEntry);
         }
 
-        private static async void SendLogToServer(LogEntry logEntry)
+        // Push a log line to every connected client (each MCP server keeps its own buffer).
+        private static void BroadcastLog(LogEntry logEntry)
         {
-            try
+            List<ClientConnection> snapshot;
+            lock (clients)
             {
-                var message = JsonConvert.SerializeObject(new
+                if (clients.Count == 0) return;
+                snapshot = new List<ClientConnection>(clients);
+            }
+
+            var message = JsonConvert.SerializeObject(new
+            {
+                type = "log",
+                data = new
                 {
-                    type = "log",
-                    data = new
-                    {
-                        message = logEntry.Message,
-                        stackTrace = logEntry.StackTrace,
-                        logType = logEntry.Type.ToString(),
-                        timestamp = logEntry.Timestamp
-                    }
-                });
-
-                var buffer = Encoding.UTF8.GetBytes(message);
-                await webSocket.SendAsync(new ArraySegment<byte>(buffer), WebSocketMessageType.Text, true, cts.Token);
-            }
-            catch (Exception e)
-            {
-                Debug.LogError($"[UnityMCP] Failed to send log to server: {e.Message}");
-            }
-        }
-
-        public static string[] GetRecentLogs(LogType[] types = null, int count = 100)
-        {
-            lock (logBuffer)
-            {
-                var logs = logBuffer.ToArray()
-                    .Where(log => types == null || types.Contains(log.Type))
-                    .TakeLast(count)
-                    .Select(log => $"[{log.Timestamp:yyyy-MM-dd HH:mm:ss}] [{log.Type}] {log.Message}")
-                    .ToArray();
-                return logs;
-            }
-        }
-
-        private static async void ConnectToServer()
-        {
-            if (webSocket != null &&
-                (webSocket.State == WebSocketState.Connecting ||
-                 webSocket.State == WebSocketState.Open))
-            {
-                // Debug.Log("[UnityMCP] Already connected or connecting");
-                return;
-            }
-
-            try
-            {
-                Debug.Log($"[UnityMCP] Attempting to connect to MCP Server at {serverUri}");
-                // Debug.Log($"[UnityMCP] Current Unity version: {Application.unityVersion}");
-                // Debug.Log($"[UnityMCP] Current platform: {Application.platform}");
-
-                webSocket = new ClientWebSocket();
-                webSocket.Options.KeepAliveInterval = TimeSpan.FromSeconds(60);
-
-                var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(5));
-                using var linkedCts = CancellationTokenSource.CreateLinkedTokenSource(cts.Token, timeout.Token);
-
-                await webSocket.ConnectAsync(serverUri, linkedCts.Token);
-                isConnected = true;
-                Debug.Log("[UnityMCP] Successfully connected to MCP Server");
-                StartReceiving();
-                
-                // Initialize editor state reporter
-                editorStateReporter = new EditorStateReporter();
-            }
-            catch (OperationCanceledException)
-            {
-                lastErrorMessage = "[UnityMCP] Connection attempt timed out";
-                Debug.LogError(lastErrorMessage);
-                isConnected = false;
-            }
-            catch (WebSocketException we)
-            {
-                lastErrorMessage = $"[UnityMCP] WebSocket error: {we.Message}\nDetails: {we.InnerException?.Message}";
-                Debug.LogError(lastErrorMessage);
-                // Debug.LogError($"[UnityMCP] Stack trace: {we.StackTrace}");
-                isConnected = false;
-            }
-            catch (Exception e)
-            {
-                lastErrorMessage = $"[UnityMCP] Failed to connect to MCP Server: {e.Message}\nType: {e.GetType().Name}";
-                Debug.LogError(lastErrorMessage);
-                // Debug.LogError($"[UnityMCP] Stack trace: {e.StackTrace}");
-                isConnected = false;
-            }
-        }
-
-        private static float reconnectTimer = 0f;
-        private static readonly float reconnectInterval = 5f;
-
-        private static void Update()
-        {
-            if (!isConnected && webSocket?.State != WebSocketState.Open)
-            {
-                reconnectTimer += Time.deltaTime;
-                if (reconnectTimer >= reconnectInterval)
-                {
-                    Debug.Log("[UnityMCP] Attempting to reconnect...");
-                    ConnectToServer();
-                    reconnectTimer = 0f;
+                    message = logEntry.Message,
+                    stackTrace = logEntry.StackTrace,
+                    logType = logEntry.Type.ToString(),
+                    timestamp = logEntry.Timestamp
                 }
+            });
+
+            foreach (var client in snapshot)
+            {
+                _ = SafeSend(client, message);
             }
         }
 
-        private static async void StartReceiving()
-        {
-            var buffer = new byte[1024 * 4];
-            var messageBuffer = new List<byte>();
-            try
-            {
-                while (webSocket.State == WebSocketState.Open)
-                {
-                    var result = await webSocket.ReceiveAsync(new ArraySegment<byte>(buffer), cts.Token);
-                    
-                    if (result.MessageType == WebSocketMessageType.Text)
-                    {
-                        // Add received data to our message buffer
-                        messageBuffer.AddRange(new ArraySegment<byte>(buffer, 0, result.Count));
-                        
-                        // If this is the end of the message, process it
-                        if (result.EndOfMessage)
-                        {
-                            var message = Encoding.UTF8.GetString(messageBuffer.ToArray());
-                            await HandleMessage(message);
-                            messageBuffer.Clear();
-                        }
-                        // Otherwise, continue receiving the rest of the message
-                    }
-                    else if (result.MessageType == WebSocketMessageType.Close)
-                    {
-                        // Handle close message
-                        await webSocket.CloseAsync(WebSocketCloseStatus.NormalClosure, string.Empty, cts.Token);
-                        isConnected = false;
-                        Debug.Log("[UnityMCP] WebSocket connection closed normally");
-                        break;
-                    }
-                }
-            }
-            catch (Exception e)
-            {
-                Debug.LogError($"Error receiving message: {e.Message}");
-                isConnected = false;
-            }
-        }
-
-        private static async Task HandleMessage(string message)
+        private static async Task SafeSend(ClientConnection client, string message)
         {
             try
             {
-                var data = JsonConvert.DeserializeObject<Dictionary<string, object>>(message);
-                switch (data["type"].ToString())
-                {
-                    case "executeEditorCommand":
-                        await EditorCommandExecutor.ExecuteEditorCommand(webSocket, cts.Token, data["data"].ToString());
-                        break;
-                    case "getEditorState":
-                        await editorStateReporter.SendEditorState(webSocket, cts.Token);
-                        break;
-                }
+                await client.SendTextAsync(message, serverCts?.Token ?? CancellationToken.None).ConfigureAwait(false);
             }
-            catch (Exception e)
+            catch (Exception)
             {
-                Debug.LogError($"Error handling message: {e.Message}");
+                // Client is likely gone; its receive loop will remove it.
             }
         }
     }
