@@ -37,6 +37,12 @@ namespace UnityMCP.Editor
         private static bool isLoggingEnabled = true;
         private static readonly EditorStateReporter editorStateReporter = new EditorStateReporter();
 
+        // Diagnostics surfaced in the debug window.
+        private static DateTime serverStartedUtc;
+        private static string lastRequestType;
+        private static DateTime lastRequestUtc;
+        private static int totalRequests;
+
         // Public properties for the debug window.
         // IsListening is the authoritative signal: the server owns the port and is accepting
         // connections. False means the bind failed (e.g. another process holds the port) - see
@@ -46,6 +52,36 @@ namespace UnityMCP.Editor
         public static int ConnectedClientCount { get { lock (clients) { return clients.Count; } } }
         public static Uri ServerUri => new Uri($"ws://localhost:{Port}/");
         public static string LastErrorMessage => lastErrorMessage;
+        public static DateTime ServerStartedUtc => serverStartedUtc;
+        public static string LastRequestType => lastRequestType;
+        public static DateTime LastRequestUtc => lastRequestUtc;
+        public static int TotalRequestCount => totalRequests;
+        public static int BufferedLogCount { get { lock (logBuffer) { return logBuffer.Count; } } }
+
+        // Snapshot of currently connected clients, for the debug window.
+        public readonly struct ClientInfo
+        {
+            public readonly string Endpoint;
+            public readonly DateTime ConnectedAtUtc;
+            public ClientInfo(string endpoint, DateTime connectedAtUtc)
+            {
+                Endpoint = endpoint;
+                ConnectedAtUtc = connectedAtUtc;
+            }
+        }
+
+        public static ClientInfo[] GetConnectedClients()
+        {
+            lock (clients)
+            {
+                var arr = new ClientInfo[clients.Count];
+                for (int i = 0; i < clients.Count; i++)
+                {
+                    arr[i] = new ClientInfo(clients[i].RemoteEndPoint, clients[i].ConnectedAtUtc);
+                }
+                return arr;
+            }
+        }
         public static bool IsLoggingEnabled
         {
             get => isLoggingEnabled;
@@ -118,6 +154,7 @@ namespace UnityMCP.Editor
                 try { listener.Server.DualMode = true; } catch { }
                 listener.Start();
                 isListening = true;
+                serverStartedUtc = DateTime.UtcNow;
                 lastErrorMessage = "";
                 Debug.Log($"[UnityMCP] WebSocket server listening on ws://localhost:{Port}/");
                 _ = AcceptLoop(serverCts.Token);
@@ -234,6 +271,13 @@ namespace UnityMCP.Editor
                 type = data.ContainsKey("type") ? data["type"]?.ToString() : null;
                 id = data.ContainsKey("id") ? data["id"]?.ToString() : null;
                 var payload = data.ContainsKey("data") && data["data"] != null ? data["data"].ToString() : "{}";
+
+                if (type == "executeEditorCommand" || type == "getEditorState")
+                {
+                    lastRequestType = type;
+                    lastRequestUtc = DateTime.UtcNow;
+                    Interlocked.Increment(ref totalRequests);
+                }
 
                 switch (type)
                 {

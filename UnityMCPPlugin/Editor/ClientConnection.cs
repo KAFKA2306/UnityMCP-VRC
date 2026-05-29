@@ -27,10 +27,17 @@ namespace UnityMCP.Editor
         // broadcast on the same socket; this serializes every write to the client.
         private readonly SemaphoreSlim sendLock = new SemaphoreSlim(1, 1);
 
+        // Diagnostics (the remote endpoint is captured now because it's unavailable after close).
+        public string RemoteEndPoint { get; }
+        public DateTime ConnectedAtUtc { get; }
+
         private ClientConnection(TcpClient tcp, NetworkStream stream)
         {
             this.tcp = tcp;
             this.stream = stream;
+            try { RemoteEndPoint = tcp.Client.RemoteEndPoint?.ToString(); } catch { /* ignore */ }
+            if (string.IsNullOrEmpty(RemoteEndPoint)) RemoteEndPoint = "unknown";
+            ConnectedAtUtc = DateTime.UtcNow;
         }
 
         // Performs the WebSocket upgrade handshake. Returns a ready connection, or null if the

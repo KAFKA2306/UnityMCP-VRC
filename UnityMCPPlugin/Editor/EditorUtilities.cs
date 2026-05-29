@@ -19,6 +19,9 @@ namespace UnityMCP.Editor
         private static readonly ConcurrentQueue<Action> mainThreadQueue = new ConcurrentQueue<Action>();
         private static bool loggedThrottleHint = false;
 
+        /// <summary>Number of queued main-thread actions waiting to run (for diagnostics).</summary>
+        public static int PendingMainThreadActions => mainThreadQueue.Count;
+
         [InitializeOnLoadMethod]
         private static void RegisterMainThreadPump()
         {

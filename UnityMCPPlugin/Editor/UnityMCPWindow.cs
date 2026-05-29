@@ -6,10 +6,7 @@ namespace UnityMCP.Editor
 {
     public class UnityMCPWindow : EditorWindow
     {
-        // State tracking for efficient repainting
-        private bool previousListeningState;
-        private bool previousConnectionState;
-        private string previousErrorMessage;
+        private double lastRepaint;
 
         [MenuItem("UnityMCP/Debug Window", false, 1)]
         public static void ShowWindow()
@@ -19,35 +16,21 @@ namespace UnityMCP.Editor
 
         void OnEnable()
         {
-            // Initialize state tracking
-            previousListeningState = UnityMCPConnection.IsListening;
-            previousConnectionState = UnityMCPConnection.IsConnected;
-            previousErrorMessage = UnityMCPConnection.LastErrorMessage;
-            
-            // Register for updates
-            EditorApplication.update += CheckForChanges;
+            EditorApplication.update += Tick;
         }
 
         void OnDisable()
         {
-            // Clean up
-            EditorApplication.update -= CheckForChanges;
+            EditorApplication.update -= Tick;
         }
 
-        void CheckForChanges()
+        // Repaint a couple of times a second so the live values (uptime, "x ago",
+        // connected durations, queue depth) keep ticking while the window is open.
+        void Tick()
         {
-            // Only repaint if something we're displaying has changed
-            bool listeningChanged = previousListeningState != UnityMCPConnection.IsListening;
-            bool connectionChanged = previousConnectionState != UnityMCPConnection.IsConnected;
-            bool errorChanged = previousErrorMessage != UnityMCPConnection.LastErrorMessage;
-
-            if (listeningChanged || connectionChanged || errorChanged)
+            if (EditorApplication.timeSinceStartup - lastRepaint >= 0.5)
             {
-                // Update cached values
-                previousListeningState = UnityMCPConnection.IsListening;
-                previousConnectionState = UnityMCPConnection.IsConnected;
-                previousErrorMessage = UnityMCPConnection.LastErrorMessage;
-
+                lastRepaint = EditorApplication.timeSinceStartup;
                 Repaint();
             }
         }
@@ -57,56 +40,29 @@ namespace UnityMCP.Editor
             try
             {
                 EditorGUILayout.Space(10);
-
                 GUILayout.Label("UnityMCP Debug", EditorStyles.boldLabel);
                 EditorGUILayout.Space(5);
 
-                // Server (port) status - the authoritative signal: did the plugin actually bind
-                // the port and is it accepting connections? Distinct from whether any client is on.
-                // If this is red, another process is likely holding the port (see Last Error).
-                bool listening = UnityMCPConnection.IsListening;
-                EditorGUILayout.BeginHorizontal(EditorStyles.helpBox);
-                EditorGUILayout.LabelField("Server:", GUILayout.Width(120));
-                GUI.color = listening ? Color.green : Color.red;
-                EditorGUILayout.LabelField(
-                    listening ? "Listening" : "NOT listening (port unavailable?)",
-                    EditorStyles.boldLabel);
-                GUI.color = Color.white;
-                EditorGUILayout.EndHorizontal();
-
+                DrawServerStatus();
                 EditorGUILayout.Space(5);
-
-                // How many MCP clients (Claude sessions) are currently connected. With the server
-                // healthy, zero clients is normal (idle), not an error - so this isn't shown red.
-                int clientCount = UnityMCPConnection.ConnectedClientCount;
-                EditorGUILayout.BeginHorizontal(EditorStyles.helpBox);
-                EditorGUILayout.LabelField("MCP Clients:", GUILayout.Width(120));
-                GUI.color = clientCount > 0 ? Color.green : Color.gray;
-                EditorGUILayout.LabelField(
-                    clientCount > 0 ? $"Connected ({clientCount})" : "None connected",
-                    EditorStyles.boldLabel);
-                GUI.color = Color.white;
-                EditorGUILayout.EndHorizontal();
-
+                DrawClients();
                 EditorGUILayout.Space(5);
+                DrawAddress();
+                EditorGUILayout.Space(5);
+                DrawLastRequest();
+                EditorGUILayout.Space(5);
+                DrawEditorState();
 
-                // Server address (selectable, for copy-paste)
-                EditorGUILayout.BeginHorizontal(EditorStyles.helpBox);
-                EditorGUILayout.LabelField("Address:", GUILayout.Width(120));
-                EditorGUILayout.SelectableLabel(UnityMCPConnection.ServerUri.ToString(), EditorStyles.textField, GUILayout.Height(20));
-                EditorGUILayout.EndHorizontal();
+                EditorGUILayout.Space(8);
+                DrawLoggingToggle();
 
                 EditorGUILayout.Space(10);
-
-                // Restart the WebSocket server (e.g. if the port failed to bind)
                 if (GUILayout.Button("Restart Server", GUILayout.Height(30)))
                 {
                     UnityMCPConnection.RetryConnection();
                 }
 
                 EditorGUILayout.Space(10);
-
-                // Last error message if any
                 if (!string.IsNullOrEmpty(UnityMCPConnection.LastErrorMessage))
                 {
                     EditorGUILayout.LabelField("Last Error:", EditorStyles.boldLabel);
@@ -119,6 +75,101 @@ namespace UnityMCP.Editor
             }
         }
 
-        // Remove the old Update method as we're using EditorApplication.update instead
+        // The authoritative signal: did the plugin actually bind the port and is it accepting
+        // connections? If this is red, another process is likely holding the port (see Last Error).
+        private static void DrawServerStatus()
+        {
+            bool listening = UnityMCPConnection.IsListening;
+            EditorGUILayout.BeginHorizontal(EditorStyles.helpBox);
+            EditorGUILayout.LabelField("Server:", GUILayout.Width(110));
+            GUI.color = listening ? Color.green : Color.red;
+            string text = listening
+                ? $"Listening  ·  up {FormatDuration(DateTime.UtcNow - UnityMCPConnection.ServerStartedUtc)}"
+                : "NOT listening (port unavailable?)";
+            EditorGUILayout.LabelField(text, EditorStyles.boldLabel);
+            GUI.color = Color.white;
+            EditorGUILayout.EndHorizontal();
+        }
+
+        // How many MCP clients (Claude sessions) are attached, with each one's remote endpoint and
+        // how long it's been connected. With the server healthy, zero clients is normal (idle).
+        private static void DrawClients()
+        {
+            var clients = UnityMCPConnection.GetConnectedClients();
+            EditorGUILayout.BeginHorizontal(EditorStyles.helpBox);
+            EditorGUILayout.LabelField("MCP Clients:", GUILayout.Width(110));
+            GUI.color = clients.Length > 0 ? Color.green : Color.gray;
+            EditorGUILayout.LabelField(
+                clients.Length > 0 ? $"Connected ({clients.Length})" : "None connected",
+                EditorStyles.boldLabel);
+            GUI.color = Color.white;
+            EditorGUILayout.EndHorizontal();
+
+            foreach (var c in clients)
+            {
+                EditorGUILayout.BeginHorizontal();
+                GUILayout.Space(24);
+                EditorGUILayout.LabelField(
+                    $"{c.Endpoint}  ·  {FormatDuration(DateTime.UtcNow - c.ConnectedAtUtc)}",
+                    EditorStyles.miniLabel);
+                EditorGUILayout.EndHorizontal();
+            }
+        }
+
+        private static void DrawAddress()
+        {
+            EditorGUILayout.BeginHorizontal(EditorStyles.helpBox);
+            EditorGUILayout.LabelField("Address:", GUILayout.Width(110));
+            EditorGUILayout.SelectableLabel(
+                UnityMCPConnection.ServerUri.ToString(), EditorStyles.textField, GUILayout.Height(20));
+            EditorGUILayout.EndHorizontal();
+        }
+
+        // Confirms the link is actually doing work, not just idle-connected.
+        private static void DrawLastRequest()
+        {
+            EditorGUILayout.BeginHorizontal(EditorStyles.helpBox);
+            EditorGUILayout.LabelField("Last request:", GUILayout.Width(110));
+            string text = UnityMCPConnection.TotalRequestCount == 0
+                ? "none yet"
+                : $"{UnityMCPConnection.LastRequestType}  ·  {FormatDuration(DateTime.UtcNow - UnityMCPConnection.LastRequestUtc)} ago" +
+                  $"  ·  {UnityMCPConnection.TotalRequestCount} total";
+            EditorGUILayout.LabelField(text);
+            EditorGUILayout.EndHorizontal();
+        }
+
+        // Surfaces the conditions that make a tool call stall: Unity compiling, or work backed up
+        // in the main-thread queue (e.g. the Editor is unfocused and throttled).
+        private static void DrawEditorState()
+        {
+            bool compiling = EditorApplication.isCompiling;
+            int queued = EditorUtilities.PendingMainThreadActions;
+            EditorGUILayout.BeginHorizontal(EditorStyles.helpBox);
+            EditorGUILayout.LabelField("Editor:", GUILayout.Width(110));
+            GUI.color = (compiling || queued > 0) ? Color.yellow : Color.white;
+            EditorGUILayout.LabelField($"{(compiling ? "Compiling…" : "Ready")}  ·  main-thread queue: {queued}");
+            GUI.color = Color.white;
+            EditorGUILayout.EndHorizontal();
+        }
+
+        private static void DrawLoggingToggle()
+        {
+            bool current = UnityMCPConnection.IsLoggingEnabled;
+            bool updated = EditorGUILayout.ToggleLeft(
+                $"Forward Unity logs to clients  (buffered: {UnityMCPConnection.BufferedLogCount})",
+                current);
+            if (updated != current)
+            {
+                UnityMCPConnection.IsLoggingEnabled = updated;
+            }
+        }
+
+        private static string FormatDuration(TimeSpan ts)
+        {
+            if (ts.TotalSeconds < 0) ts = TimeSpan.Zero;
+            if (ts.TotalHours >= 1) return $"{(int)ts.TotalHours}h {ts.Minutes:00}m";
+            if (ts.TotalMinutes >= 1) return $"{ts.Minutes}m {ts.Seconds:00}s";
+            return $"{ts.Seconds}s";
+        }
     }
 }
