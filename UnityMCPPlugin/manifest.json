@@ -5,7 +5,7 @@
   "changelogUrl": "https://github.com/anthropic/unity-mcp/changelog.md",
   "licensesUrl": "https://github.com/anthropic/unity-mcp/license.md",
   "dependencies": {
-    "com.unity.nuget.newtonsoft-json": "3.0.2"
+    "com.unity.nuget.newtonsoft-json": "3.2.1"
   },
   "keywords": [
     "claude",
