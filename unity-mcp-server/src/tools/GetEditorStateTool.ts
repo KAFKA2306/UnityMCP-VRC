@@ -11,6 +11,7 @@ export interface UnityEditorState {
     assets?: string[];
     [key: string]: string[] | undefined;
   };
+  error?: string;
 }
 
 export interface UnityEditorStateHandler {
@@ -25,7 +26,11 @@ let unityEditorStateTime: number | null = null;
 // New method to resolve the command result - called when results arrive from Unity
 export function resolveUnityEditorState(result: UnityEditorState): void {
   if (unityEditorStatePromise) {
-    unityEditorStatePromise.resolve(result);
+    if (result.error) {
+      unityEditorStatePromise.reject(new Error(result.error));
+    } else {
+      unityEditorStatePromise.resolve(result);
+    }
     unityEditorStatePromise = null;
   }
 }
@@ -35,7 +40,7 @@ export class GetEditorStateTool implements Tool {
     return {
       name: "get_editor_state",
       description:
-        "Retrieve the current state of the Unity Editor, including active GameObjects, selection state, play mode status, scene hierarchy, project structure, and assets. This tool provides a comprehensive snapshot of the editor's current context.",
+        "Retrieve the current state of the Unity Editor, including active GameObjects, selection state, play mode status, scene hierarchy, project structure, and assets. This tool provides a comprehensive snapshot of the editor's current context. Note: while the Unity Editor window is unfocused its update loop is throttled, so a call may not complete until you refocus the Editor (or set Preferences > General > Interaction Mode to 'No Throttling').",
       category: "Editor State",
       tags: ["unity", "editor", "state", "hierarchy", "project"],
       inputSchema: {

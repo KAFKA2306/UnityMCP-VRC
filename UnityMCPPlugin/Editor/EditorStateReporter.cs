@@ -35,22 +35,34 @@ namespace UnityMCP.Editor
         {
             try
             {
-                if (webSocket?.State == WebSocketState.Open)
-                {
-                    var state = GetEditorState();
-                    var message = JsonConvert.SerializeObject(new
-                    {
-                        type = "editorState",
-                        data = state
-                    });
-                    var buffer = Encoding.UTF8.GetBytes(message);
-                    await webSocket.SendAsync(new ArraySegment<byte>(buffer), WebSocketMessageType.Text, true, cancellationToken);
-                    Debug.Log("[UnityMCP] Sent editor state upon request");
-                }
-                else
+                if (webSocket == null || webSocket.State != WebSocketState.Open)
                 {
                     Debug.LogWarning("[UnityMCP] Cannot send editor state - connection closed");
+                    return;
                 }
+
+                object state;
+                try
+                {
+                    // Gathering editor state touches Unity APIs, so it must run on the main thread.
+                    // RunOnMainThread waits for the Editor to tick (deferring while it compiles) and
+                    // only errors if the Editor stays unfocused past the timeout.
+                    state = await EditorUtilities.RunOnMainThread(() => GetEditorState()).ConfigureAwait(false);
+                }
+                catch (Exception ex)
+                {
+                    Debug.LogWarning($"[UnityMCP] Could not get editor state: {ex.Message}");
+                    state = new { error = ex.Message };
+                }
+
+                var message = JsonConvert.SerializeObject(new
+                {
+                    type = "editorState",
+                    data = state
+                });
+                var buffer = Encoding.UTF8.GetBytes(message);
+                await webSocket.SendAsync(new ArraySegment<byte>(buffer), WebSocketMessageType.Text, true, cancellationToken).ConfigureAwait(false);
+                Debug.Log("[UnityMCP] Sent editor state upon request");
             }
             catch (Exception e)
             {
@@ -62,9 +74,6 @@ namespace UnityMCP.Editor
         {
             try
             {
-                // Wait for any ongoing Unity compilation to finish first
-                EditorUtilities.WaitForUnityCompilation();
-
                 var activeGameObjects = new List<string>();
                 var selectedObjects = new List<string>();
 
