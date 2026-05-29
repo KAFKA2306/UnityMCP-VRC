@@ -76,6 +76,28 @@ namespace UnityMCP.Editor
                 ConnectToServer();
             };
             EditorApplication.update += Update;
+            AssemblyReloadEvents.beforeAssemblyReload += OnBeforeAssemblyReload;
+        }
+
+        // A domain reload (triggered by recompiles, including execute_editor_command
+        // edits) wipes all managed state here - this socket, EditorUtilities' main-thread
+        // queue, and any in-flight requests. Close the socket now so the MCP server learns
+        // immediately and can fail pending requests with a "retry" instead of waiting out
+        // its timeout. A graceful CloseAsync can't reliably finish before the domain dies,
+        // so Abort() gives a prompt, synchronous teardown; the plugin reconnects after the
+        // reload via Update()'s reconnect loop.
+        private static void OnBeforeAssemblyReload()
+        {
+            try
+            {
+                isConnected = false;
+                webSocket?.Abort();
+                webSocket?.Dispose();
+            }
+            catch (Exception e)
+            {
+                Debug.LogWarning($"[UnityMCP] Error closing socket before assembly reload: {e.Message}");
+            }
         }
 
         private static void HandleLogMessage(string message, string stackTrace, LogType type)

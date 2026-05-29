@@ -35,6 +35,16 @@ export function resolveUnityEditorState(result: UnityEditorState): void {
   }
 }
 
+// Reject an in-flight request - called when the Unity connection drops (e.g. a
+// domain reload) so the request fails fast with a retry hint instead of hanging
+// until the timeout. No-op if nothing is pending.
+export function rejectPendingEditorState(reason: Error): void {
+  if (unityEditorStatePromise) {
+    unityEditorStatePromise.reject(reason);
+    unityEditorStatePromise = null;
+  }
+}
+
 export class GetEditorStateTool implements Tool {
   getDefinition(): ToolDefinition {
     return {

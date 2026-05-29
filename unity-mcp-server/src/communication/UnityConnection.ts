@@ -1,7 +1,15 @@
 import { WebSocket, WebSocketServer } from "ws";
-import { CommandResult, resolveCommandResult } from "../tools/ExecuteEditorCommandTool.js";
+import {
+  CommandResult,
+  resolveCommandResult,
+  rejectPendingCommandResult,
+} from "../tools/ExecuteEditorCommandTool.js";
 import { LogEntry } from "../tools/index.js";
-import { resolveUnityEditorState, UnityEditorState } from "../tools/GetEditorStateTool.js";
+import {
+  resolveUnityEditorState,
+  rejectPendingEditorState,
+  UnityEditorState,
+} from "../tools/GetEditorStateTool.js";
 
 export class UnityConnection {
   private wsServer: WebSocketServer;
@@ -47,13 +55,37 @@ export class UnityConnection {
 
       ws.on("error", (error) => {
         console.error("[Unity MCP] WebSocket error:", error);
+        this.rejectPendingRequests(
+          new Error(
+            "Unity connection errored (likely recompiling or reloading). Retry in a moment.",
+          ),
+        );
       });
 
       ws.on("close", () => {
         console.error("[Unity MCP] Unity Editor disconnected");
-        this.connection = null;
+        // Only clear if this is still the active socket - a stale socket closing
+        // after Unity has already reconnected must not null the new connection.
+        if (this.connection === ws) {
+          this.connection = null;
+        }
+        this.rejectPendingRequests(
+          new Error(
+            "Unity disconnected (likely recompiling or reloading its app domain). " +
+              "The connection re-establishes automatically - retry in a moment.",
+          ),
+        );
       });
     });
+  }
+
+  // Fail any in-flight tool requests when the connection drops, so they return a
+  // retry hint immediately instead of hanging until their timeout. Each reject is
+  // a no-op when nothing is pending, and idempotent across error+close. New
+  // request-bearing tools should add their reject here.
+  private rejectPendingRequests(reason: Error): void {
+    rejectPendingCommandResult(reason);
+    rejectPendingEditorState(reason);
   }
 
   private handleUnityMessage(message: any) {

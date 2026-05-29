@@ -35,6 +35,16 @@ export function resolveCommandResult(result: CommandResult): void {
   }
 }
 
+// Reject an in-flight command - called when the Unity connection drops (e.g. a
+// domain reload) so the request fails fast with a retry hint instead of hanging
+// until the timeout. No-op if nothing is pending.
+export function rejectPendingCommandResult(reason: Error): void {
+  if (commandResultPromise) {
+    commandResultPromise.reject(reason);
+    commandResultPromise = null;
+  }
+}
+
 export class ExecuteEditorCommandTool implements Tool {
   getDefinition(): ToolDefinition {
     return {
