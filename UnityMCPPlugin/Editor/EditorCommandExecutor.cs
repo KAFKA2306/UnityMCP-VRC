@@ -144,23 +144,6 @@ namespace UnityMCP.Editor
                 }
             }
 
-            void AddAssemblyByName(string name)
-            {
-                try
-                {
-                    var assembly = AppDomain.CurrentDomain.GetAssemblies()
-                        .FirstOrDefault(a => a.GetName().Name == name);
-                    if (assembly != null)
-                    {
-                        AddAssemblyReference(assembly.Location);
-                    }
-                }
-                catch (Exception e)
-                {
-                    Debug.LogWarning($"[UnityMCP] Failed to add assembly {name}: {e.Message}");
-                }
-            }
-
             try
             {
                 options.CoreAssemblyFileName = typeof(object).Assembly.Location;
@@ -183,46 +166,31 @@ namespace UnityMCP.Editor
                     AddAssemblyReference(netstandardAssembly.Location);
                 }
 
-                // Add common Unity modules
-                var commonModules = new[] {
-                    "UnityEngine.AnimationModule",
-                    "UnityEngine.CoreModule",
-                    "UnityEngine.IMGUIModule",
-                    "UnityEngine.ParticleSystemModule",
-                    "UnityEngine.PhysicsModule",
-                    "UnityEngine.TerrainModule",
-                    "UnityEngine.TextRenderingModule",
-                    "UnityEngine.TerrainPhysicsModule",
-                    "UnityEngine.UIModule",
-                    "Unity.TextMeshPro",
-                    "Unity.TextMeshPro.Editor"
-                };
-
-                foreach (var moduleName in commonModules)
+                // Reference every loaded UnityEngine/Unity module + the project's own
+                // scripts + VRChat assemblies, so snippets can use any engine API
+                // (e.g. ImageConversion.EncodeToPNG, JsonUtility, ScreenCapture) and call
+                // project/editor types (Assembly-CSharp[-Editor], UdonSharp behaviours)
+                // without this list needing manual upkeep.
+                foreach (var asm in AppDomain.CurrentDomain.GetAssemblies())
                 {
-                    AddAssemblyByName(moduleName);
+                    if (asm.IsDynamic) continue;
+                    string loc;
+                    try { loc = asm.Location; } catch { continue; }
+                    if (string.IsNullOrEmpty(loc)) continue;
+
+                    var name = asm.GetName().Name;
+                    bool include =
+                        name.StartsWith("UnityEngine") ||  // all engine modules incl. ImageConversion
+                        name.StartsWith("Unity.") ||        // packages (TextMeshPro, Burst, ...)
+                        name.StartsWith("VRC") ||           // VRCSDK3, VRCSDKBase, VRC.Udon, ...
+                        name.StartsWith("UdonSharp") ||
+                        name == "Assembly-CSharp" ||        // project runtime scripts
+                        name == "Assembly-CSharp-Editor";   // project editor scripts (e.g. SsxLevelImporter)
+
+                    if (include) AddAssemblyReference(loc);
                 }
 
-                // Add VRChat Udon and UdonSharp assemblies
-                var vrchatAssemblies = new[] {
-                    "VRC.Udon",
-                    "VRC.Udon.Common",
-                    "VRC.Udon.Editor",
-                    "VRC.Udon.Serialization.OdinSerializer",
-                    "VRC.Udon.VM",
-                    "VRC.Udon.Wrapper",
-                    "UdonSharp.Editor",
-                    "UdonSharp.Runtime",
-                    "VRCSDK3",
-                    "VRCSDKBase", // Additional VRC SDK parts that might be needed
-                };
-
-                foreach (var assemblyName in vrchatAssemblies)
-                {
-                    AddAssemblyByName(assemblyName);
-                }
-
-                // Debug.Log("Added Assembly References:" + string.join(", ", options.ReferencedAssemblies));
+                // Debug.Log("Added Assembly References:" + string.Join(", ", options.ReferencedAssemblies));
             }
             catch (Exception e)
             {

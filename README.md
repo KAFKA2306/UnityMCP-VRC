@@ -15,12 +15,11 @@ This repo also has a many general improvements that work with normal Unity devel
 - Changed how code is executed so that the LLM can define the usings, classes, and functions
   - Allows the LLM to execute more complex commands with multiple functions
 - Stack traces eat up a lot of context so just return the first line which is usually enough
-- Incorporated references for various modules:
-  - .Net Standard
-  - System.Core, System.IO
-  - TextMeshPro assembly
-  - VRChat assemblies
-  - Unity Physics
+- Automatically references all loaded assemblies so commands can use any available API without a hand-maintained list:
+  - All UnityEngine modules (Physics, ImageConversion, ...) and Unity packages (TextMeshPro, Burst, ...)
+  - VRChat and UdonSharp assemblies
+  - .Net Standard / System.Core / mscorlib
+  - Project scripts: Assembly-CSharp and Assembly-CSharp-Editor
   - A reference to MCPUnity itself so you can provide helper functions to MCP commands
 
 ### Unity Editor Integration
@@ -28,6 +27,7 @@ This repo also has a many general improvements that work with normal Unity devel
 - Changed `getEditorState` to run on demand instead of continuously
 - Implemented waiting for pending compilations when getting editor state and running commands
 - Revised GetAssets to retrieve all content from the Assets/ folder
+- `getEditorState` now caps large scenes/projects (≤300 listed objects/assets, ≤500 hierarchy nodes, depth ≤8) so the state dump can't blow up the context window
 
 ### Manual Script Testing
 - Created a script tester for diagnosing C# script commands

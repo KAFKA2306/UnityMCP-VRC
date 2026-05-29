@@ -15,6 +15,21 @@ namespace UnityMCP.Editor
     {
         private string lastErrorMessage = "";
 
+        // Bounds so a large scene/project can't return a multi-megabyte state dump.
+        private const int MaxFlatList = 300;       // activeGameObjects / asset paths
+        private const int MaxHierarchyNodes = 500; // total nodes walked in the hierarchy
+        private const int MaxHierarchyDepth = 8;   // max recursion depth
+        private int hierNodeCount;
+
+        private static List<string> Cap(IEnumerable<string> src)
+        {
+            var list = src != null ? src.ToList() : new List<string>();
+            if (list.Count <= MaxFlatList) return list;
+            var capped = list.Take(MaxFlatList).ToList();
+            capped.Add($"...(+{list.Count - MaxFlatList} more, {list.Count} total)");
+            return capped;
+        }
+
         // New method to send editor state
         public async Task SendEditorState(ClientWebSocket webSocket, CancellationToken cancellationToken)
         {
@@ -84,12 +99,13 @@ namespace UnityMCP.Editor
                 var projectStructure = new
                 {
                     scenes = GetSceneNames() ?? new string[0],
-                    assets = GetAssetPaths() ?? new string[0]
+                    assets = Cap(GetAssetPaths())
                 };
 
                 return new
                 {
-                    activeGameObjects,
+                    activeGameObjects = Cap(activeGameObjects),
+                    activeGameObjectCount = activeGameObjects.Count,
                     selectedObjects,
                     playModeState = EditorApplication.isPlaying ? "Playing" : "Stopped",
                     sceneHierarchy,
@@ -120,6 +136,7 @@ namespace UnityMCP.Editor
 
                 if (scene.IsValid())
                 {
+                    hierNodeCount = 0;
                     var rootObjects = scene.GetRootGameObjects();
                     if (rootObjects != null)
                     {
@@ -129,7 +146,7 @@ namespace UnityMCP.Editor
                             {
                                 try
                                 {
-                                    roots.Add(GetGameObjectHierarchy(root));
+                                    roots.Add(GetGameObjectHierarchy(root, 0));
                                 }
                                 catch (Exception e)
                                 {
@@ -150,25 +167,31 @@ namespace UnityMCP.Editor
             }
         }
 
-        private object GetGameObjectHierarchy(GameObject obj)
+        private object GetGameObjectHierarchy(GameObject obj, int depth)
         {
             try
             {
                 if (obj == null) return null;
+                hierNodeCount++;
 
                 var children = new List<object>();
                 var transform = obj.transform;
 
-                if (transform != null)
+                if (transform != null && depth < MaxHierarchyDepth && hierNodeCount < MaxHierarchyNodes)
                 {
                     for (int i = 0; i < transform.childCount; i++)
                     {
+                        if (hierNodeCount >= MaxHierarchyNodes)
+                        {
+                            children.Add($"...(hierarchy truncated at {MaxHierarchyNodes} nodes)");
+                            break;
+                        }
                         try
                         {
                             var childTransform = transform.GetChild(i);
                             if (childTransform != null && childTransform.gameObject != null)
                             {
-                                var childHierarchy = GetGameObjectHierarchy(childTransform.gameObject);
+                                var childHierarchy = GetGameObjectHierarchy(childTransform.gameObject, depth + 1);
                                 if (childHierarchy != null)
                                 {
                                     children.Add(childHierarchy);
@@ -186,6 +209,7 @@ namespace UnityMCP.Editor
                 {
                     name = obj.name ?? "Unnamed",
                     components = GetComponentNames(obj),
+                    childCount = transform != null ? transform.childCount : 0,
                     children = children
                 };
             }
