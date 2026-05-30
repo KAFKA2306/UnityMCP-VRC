@@ -7,7 +7,7 @@ import {
 } from "./commandResultCache.js";
 
 // Companion to execute_editor_command: fetches later pages of a result that was too large to
-// return in one call and was cached server-side. See docs/001-execute-command-paging.md.
+// return in one call and was cached server-side. See docs/002-design-decisions.md.
 export class GetCommandPageTool implements Tool {
   getDefinition(): ToolDefinition {
     return {

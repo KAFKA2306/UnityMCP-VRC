@@ -1,91 +1,96 @@
-Forked from [Arodoid/UnityMCP](https://github.com/Arodoid/UnityMCP) see that page for the
-original README.md
+# UnityMCP-VRC
 
-## About 
+Drive the Unity Editor from Claude (or any MCP client). A Unity Editor **plugin** hosts
+a WebSocket server inside the Editor, and a small **MCP server** (Node/TypeScript)
+connects to it and exposes tools to Claude — run C# in the Editor, read editor/scene
+state, and stream Unity console logs.
 
-This repo has been extensively refactored from the source. I've been testing using Claude/MCP/Unity to create
-VRChat worlds. Claude has trouble getting UdonSharp scripts to compile so this repo supports 
-MCP resources and helper scripts which improves it's success rate in building VRC worlds
+Forked from [Arodoid/UnityMCP](https://github.com/Arodoid/UnityMCP) and extensively
+refactored, with a focus on using Claude to build **VRChat / UdonSharp** worlds — though
+most of it works for ordinary Unity development too.
 
-This repo also has a many general improvements that work with normal Unity development. Try it out. 
+## Highlights
 
-## Improvements 
+- **One Editor, many Claude sessions.** The plugin hosts the server, so any number of
+  Claude sessions can drive the same Editor at once — no fixed-port race, no
+  "connected-but-dead" zombie servers.
+- **Run real C#.** `execute_editor_command` runs LLM-authored C# (its own `using`s,
+  classes, functions) with assembly references auto-discovered from everything loaded —
+  UnityEngine, packages, VRChat/UdonSharp, project scripts — no hand-maintained list.
+- **Bounded state.** `get_editor_state` returns scene/project state on demand, capped so
+  a big project can't blow up the context window.
+- **Survives recompiles.** Domain reloads tear the link down cleanly and clients
+  auto-reconnect; in-flight requests fail fast with a retry hint instead of hanging.
+- **Live Debug Window.** Shows whether the server is actually listening, which clients
+  are attached, last request, and the main-thread queue — so a broken link is obvious.
+- **VRChat helpers + MCP resources** to raise Claude's UdonSharp success rate.
 
-### Command Execution
-- Changed how code is executed so that the LLM can define the usings, classes, and functions
-  - Allows the LLM to execute more complex commands with multiple functions
-- Stack traces eat up a lot of context so just return the first line which is usually enough
-- Automatically references all loaded assemblies so commands can use any available API without a hand-maintained list:
-  - All UnityEngine modules (Physics, ImageConversion, ...) and Unity packages (TextMeshPro, Burst, ...)
-  - VRChat and UdonSharp assemblies
-  - .Net Standard / System.Core / mscorlib
-  - Project scripts: Assembly-CSharp and Assembly-CSharp-Editor
-  - A reference to MCPUnity itself so you can provide helper functions to MCP commands
+## Tools
 
-### Unity Editor Integration
-- Added functionality to wait/retry when Unity is not connected to process commands
-- Changed `getEditorState` to run on demand instead of continuously
-- Implemented waiting for pending compilations when getting editor state and running commands
-- Revised GetAssets to retrieve all content from the Assets/ folder
-- `getEditorState` now caps large scenes/projects (≤300 listed objects/assets, ≤500 hierarchy nodes, depth ≤8) so the state dump can't blow up the context window
+| Tool                     | What it does                                                         |
+| ------------------------ | ------------------------------------------------------------------- |
+| `execute_editor_command` | Compiles and runs LLM-authored C# in the Editor; returns result + logs. |
+| `get_editor_state`       | Returns Unity/scene/project state on demand (bounded).              |
+| `get_logs`               | Returns recent Unity console logs.                                  |
 
-### Manual Script Testing
-- Created a script tester for diagnosing C# script commands
-- Allows manually executing editor commands with detailed logging
+## Getting started
 
-### MCP Resources
-- Any files added to resources/text will be exposed as a MCP resource
+**1. Build the MCP server**
+```
+cd unity-mcp-server
+npm install
+npm run build      # compiles to build/index.js and copies text resources
+```
 
-### Performance
-- Fixed MCP window high CPU usage by only repainting when changes are detected
-- Enabled support for commands longer than 4KB in Unity
-- Reduced excessive debug logs during reconnection process
+**2. Add the plugin to Unity**
+- Drag the whole `UnityMCPPlugin/` folder into your project's `Assets/`. Unity
+  regenerates `.meta` files on import — the repo doesn't track them.
+- A **UnityMCP** menu appears. Open `Debug Window` and dock it; with Unity running, the
+  **Server** row should be green / **Listening**.
 
-### Code Refactoring
-- Refactored Unity connection into its own dedicated file
-- Separated MCP server tools into individual files
-  - With a common interface to make adding new tools easier
-- Split editor state reporting and command execution into their own files
-
-### VRChat Specific features
-- Added a helper script that supports generating UdonSharp asset files from C# files
-
-## How to Use
-
-- Build the MCP Server from unity-mcp-server/
-  - `npm install`
-  - `npm run build`
-
-- In Unity
-  - Copy over the UnityMCPPlugin/ directory into your Assets folder
-  - You should now see a UnityMCP menu in your project
-    - Select `Debug Window` and dock by your projects
-
-- In Claude Desktop
-  - Enable developer mode
-  - Add the MCP server in File/Settings
-  ```
-  {
-      "mcpServers": {
-          "unity": {
-              "command": "node",
-              "args": [
-                  "C:\\git\\UnityMCP\\unity-mcp-server\\build\\index.js"
-              ]
-          }
-      }
+**3. Point Claude at it** — add the stdio MCP server to your client. Claude Desktop
+(enable developer mode, then *File > Settings*):
+```json
+{
+  "mcpServers": {
+    "unity": {
+      "command": "node",
+      "args": ["C:\\git\\UnityMCP\\unity-mcp-server\\build\\index.js"]
+    }
   }
-  ```
-  - Verify in the UnityMCP Debug Window, the Connection Status is green/connected
-  - Enter your prompt
-    - Click the attach button below the prompt to add resource artifacts
-    - Any file you add to the resources/text folder is exposed as a resource
-      - You need to build the project and restart Claude for it to see new resources
-  - Run your prompt
-    - You should see scripts executing
-    - If there are script errors you can diagnose them in Unity
-      - The UnityMCP menu has a Script Tester where you can paste in scripts to run them manually
+}
+```
+Or Claude Code: `claude mcp add unity -- node C:\git\UnityMCP\unity-mcp-server\build\index.js`
+
+**4. Verify** — in the **Debug Window**, confirm **Server: Listening** and that an **MCP
+Client** row appears once Claude starts (attach more than one session and each shows up).
+Prompt Claude; if a script errors, diagnose it in **UnityMCP > Script Tester**.
+
+## Troubleshooting
+
+- **"Connected" in Claude but nothing in Unity?** The MCP badge only reflects the
+  Claude↔server handshake, not the link to Unity. Trust the **Debug Window**: *Server:
+  Listening* + an *MCP Client* row are the real signals.
+- **Server won't bind / "NOT listening"?** Something holds port 8080 — often a stale MCP
+  server from the old architecture. Kill leftover `node` processes and click *Restart
+  Server*; the *Last Error* box shows the bind failure.
+- **Calls stall or time out?** The Editor throttles while unfocused — watch the *Editor*
+  row's queue depth. Refocus Unity, or use *Preferences > General > Interaction Mode >
+  No Throttling* for background use.
+
+More detail in [docs/001 — Architecture](docs/001-architecture.md#known-limitations--possible-next-steps).
+
+## Documentation
+
+- **[001 — Architecture](docs/001-architecture.md)** — how it works now: connection
+  model, wire protocol, threading, lifecycle, tools, file map, limits. Start here.
+- [002 — Design decisions](docs/002-design-decisions.md) — the *why* behind the
+  architecture: the inverted connection, server-side paging, and the heartbeat call.
+- [003 — Changes from the original fork](docs/003-changes-from-upstream.md) — how this
+  repo diverges from upstream [Arodoid/UnityMCP](https://github.com/Arodoid/UnityMCP):
+  the inverted topology, VRChat/UdonSharp support, paging, and the relicense.
 
 ## License
 
-This project is licensed under the Creative Commons Attribution-NonCommercial 4.0 International (CC BY-NC 4.0).
+Licensed under the Creative Commons Attribution-NonCommercial 4.0 International
+(CC BY-NC 4.0).

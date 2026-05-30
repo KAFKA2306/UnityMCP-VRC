@@ -6,7 +6,7 @@
 // can't, so this is the generic backstop: when a result exceeds the cap we cache the full
 // snapshot under a token and hand back only the first page. The agent pulls later pages via
 // the get_command_page tool, slicing the *cached* snapshot so paging is consistent even for
-// non-idempotent commands. See docs/001-execute-command-paging.md.
+// non-idempotent commands. See docs/002-design-decisions.md.
 
 /** Max chars returned in a single page before we cache + paginate (~6-8k tokens). */
 export const MAX_RESPONSE_CHARS = 25_000;

@@ -157,7 +157,7 @@ public class EditorCommand
       // Generic backstop against context-window blowout: a command's result shape is
       // unknown, so it has no source-level cap. If the serialized result fits, return it
       // as-is. Otherwise cache the full snapshot and return only the first page; the agent
-      // pulls the rest via get_command_page. See docs/001-execute-command-paging.md.
+      // pulls the rest via get_command_page. See docs/002-design-decisions.md.
       if (text.length <= MAX_RESPONSE_CHARS) {
         return { content: [{ type: "text", text }] };
       }
