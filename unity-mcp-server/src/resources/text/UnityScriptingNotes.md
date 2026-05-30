@@ -30,6 +30,21 @@ be used because it is not part of the C# 7.0 language specification`, or a parse
 like `CS1525: Unexpected symbol`. If you see either, downgrade the syntax rather than
 retrying the same code.
 
+## What's referenced (and the CS1070 trap)
+
+The full base class library is available — `System.Collections.Generic` (`List<T>`,
+`Dictionary<,>`, `HashSet<T>`, …), `System.Linq`, `System.IO`, `System.Text`,
+`System.Threading.Tasks`, `System.Reflection`, and so on — alongside all `UnityEngine`
+modules, `UnityEditor`, installed `Unity.*` packages, the VRChat/UdonSharp assemblies, and
+the project's own `Assembly-CSharp` / `Assembly-CSharp-Editor` types. You still have to add
+the matching `using` directives yourself; nothing is implicitly imported.
+
+If a type that *should* exist fails with **`CS1070` ("type forwarded to an assembly that is
+not referenced")**, it usually means a BCL facade assembly isn't on the reference list.
+This was the case for `HashSet<T>` before the reference set was broadened. If you still hit
+it for some exotic type, fall back to a referenced equivalent (e.g. a `List<T>` plus a
+`Contains` check instead of the unavailable set type) rather than retrying the same code.
+
 ## Unity's "fake null" defeats `??`, `?.`, and `is null`
 
 `UnityEngine.Object` (so `GameObject`, `Component`, `MonoBehaviour`, assets, …) overloads
@@ -78,3 +93,15 @@ Rule of thumb: for anything deriving from `UnityEngine.Object`, test with `== nu
 - **Return JSON-serializable data.** `EditorCommand.Execute()`'s return value is serialized
   back to the caller; hand back plain values / anonymous objects (ids, names, counts, paths),
   not live `UnityEngine.Object` references.
+- **Overwriting an asset file in place may not reimport.** `AssetDatabase.Refresh()` picks up
+  *new* files and ones Unity decides have changed, but copying a new `Props.obj` over an old
+  one doesn't reliably trigger a reimport — Unity may keep serving the cached import. Force the
+  specific asset(s) explicitly:
+
+  ```csharp
+  AssetDatabase.ImportAsset("Assets/Models/Props.obj",
+                            ImportAssetOptions.ForceUpdate);   // re-imports even if unchanged
+  ```
+
+  The path is project-relative, starts with `Assets/`, and uses forward slashes. Use this
+  rather than `Refresh()` whenever you've replaced an existing asset's bytes on disk.

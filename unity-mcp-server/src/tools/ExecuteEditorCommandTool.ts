@@ -37,11 +37,19 @@ export class ExecuteEditorCommandTool implements Tool {
         properties: {
           code: {
             type: "string",
-            description: `C# code file to execute in the Unity Editor context. 
-The code has access to all UnityEditor and UnityEngine APIs. 
+            description: `C# code file to execute in the Unity Editor context.
+The code has access to all UnityEditor and UnityEngine APIs.
 Include any necessary using directives at the top of the code.
 The code must have a EditorCommand class with a static Execute method that returns an object.`,
             minLength: 1,
+          },
+          timeoutMs: {
+            type: "number",
+            description:
+              "How long to wait (ms) for Unity to return a result before giving up. Defaults to 60000 (60s). Raise it for known-heavy operations (large asset imports, bulk scene edits) that would otherwise time out with no partial result. Clamped to 1000-300000.",
+            minimum: 1000,
+            maximum: 300000,
+            default: 60000,
           },
         },
         required: ["code"],
@@ -67,7 +75,7 @@ The code must have a EditorCommand class with a static Execute method that retur
           {
             error: "Timeout",
             handling:
-              "Request times out after 60 seconds (e.g. the Editor stayed unfocused or busy)",
+              "Request times out after timeoutMs (default 60s; e.g. the Editor stayed unfocused or busy). Pass a larger timeoutMs for known-heavy operations.",
           },
         ],
       },
@@ -122,6 +130,20 @@ public class EditorCommand
       );
     }
 
+    if (args.timeoutMs !== undefined && typeof args.timeoutMs !== "number") {
+      throw new McpError(
+        ErrorCode.InvalidParams,
+        "The timeoutMs parameter must be a number",
+      );
+    }
+
+    // Default to 60s, clamped to the schema bounds so a stray value can't disable the timeout
+    // or set an absurd one.
+    const timeoutMs = Math.min(
+      300_000,
+      Math.max(1_000, args.timeoutMs ?? 60_000),
+    );
+
     try {
       // Mark the current end of the log buffer (and start the clock) so we can later slice out
       // just the logs and timing for this one command.
@@ -129,7 +151,6 @@ public class EditorCommand
       const commandStartTime = Date.now();
 
       // Send command to Unity and await its correlated response (matched by request id).
-      const timeoutMs = 60_000;
       const result = await context.unityConnection.sendRequest(
         "executeEditorCommand",
         { code: args.code },

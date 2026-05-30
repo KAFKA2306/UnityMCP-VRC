@@ -1,3 +1,4 @@
+import { ClearLogsTool } from "./ClearLogsTool.js";
 import { ExecuteEditorCommandTool } from "./ExecuteEditorCommandTool.js";
 import { GetCommandPageTool } from "./GetCommandPageTool.js";
 import { GetEditorStateTool } from "./GetEditorStateTool.js";
@@ -11,6 +12,7 @@ export function getAllTools(): Tool[] {
     new GetEditorStateTool(),
     new ExecuteEditorCommandTool(),
     new GetLogsTool(),
+    new ClearLogsTool(),
     new GetCommandPageTool(),
   ];
 }

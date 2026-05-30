@@ -41,7 +41,7 @@ building, while staying useful for ordinary Unity work.
 | Plugin code       | 2 files                                       | **Broken into focused files** (connection, executor, etc.)     |
 | MCP server code   | 1 monolithic `index.ts`                       | **Thin `index.ts` + one file per tool** + resources            |
 | Resources         | —                                             | **MCP text resources** (UdonSharp / VRChat notes)              |
-| Tools             | 3                                             | 4 (`get_command_page` added)                                   |
+| Tools             | 3                                             | 5 (`get_command_page`, `clear_logs` added)                     |
 | License           | MIT                                           | **CC BY-NC 4.0**                                               |
 
 ## Changes by area
@@ -111,7 +111,7 @@ Relicensed from **MIT** to **Creative Commons Attribution-NonCommercial 4.0
 
 Screenshot capture (`take_screenshot`) and GameObject inspection (`get_object_details`),
 ported from [setohima/UnityMCP-VRC], were explored but are **not** part of the current
-committed tool set (`execute_editor_command`, `get_editor_state`, `get_logs`,
+committed tool set (`execute_editor_command`, `get_editor_state`, `get_logs`, `clear_logs`,
 `get_command_page`). Mentioned here so the omission is intentional and on the record.
 
 [setohima/UnityMCP-VRC]: https://github.com/setohima/UnityMCP-VRC

@@ -153,10 +153,10 @@ namespace UnityMCP.Editor
                 }
 
                 // Reference every loaded UnityEngine/Unity module + the project's own
-                // scripts + VRChat assemblies, so snippets can use any engine API
-                // (e.g. ImageConversion.EncodeToPNG, JsonUtility, ScreenCapture) and call
-                // project/editor types (Assembly-CSharp[-Editor], UdonSharp behaviours)
-                // without this list needing manual upkeep.
+                // scripts + VRChat assemblies + the BCL facade assemblies, so snippets can use
+                // any engine API (e.g. ImageConversion.EncodeToPNG, JsonUtility, ScreenCapture),
+                // call project/editor types (Assembly-CSharp[-Editor], UdonSharp behaviours), and
+                // use the full base class library without this list needing manual upkeep.
                 foreach (var asm in AppDomain.CurrentDomain.GetAssemblies())
                 {
                     if (asm.IsDynamic) continue;
@@ -171,7 +171,18 @@ namespace UnityMCP.Editor
                         name.StartsWith("VRC") ||           // VRCSDK3, VRCSDKBase, VRC.Udon, ...
                         name.StartsWith("UdonSharp") ||
                         name == "Assembly-CSharp" ||        // project runtime scripts
-                        name == "Assembly-CSharp-Editor";   // project editor scripts (e.g. SsxLevelImporter)
+                        name == "Assembly-CSharp-Editor" || // project editor scripts (e.g. SsxLevelImporter)
+                        // BCL facades. Because we compile with /nostdlib+, the compiler adds no
+                        // implicit references, so types whose interfaces are type-forwarded through a
+                        // facade fail with a cryptic CS1070 unless that facade is referenced - e.g.
+                        // HashSet<T> (mscorlib) implements ISet<T>, forwarded via System.Collections.
+                        // Referencing the System.* facades + mscorlib/netstandard covers the BCL.
+                        // Forwarders only redirect (they don't redefine types), so this won't trip the
+                        // "predefined type defined multiple times" error that /nostdlib+ guards against.
+                        name == "System" ||                 // System.dll (Uri, regex, ...)
+                        name.StartsWith("System.") ||        // System.Collections, System.Runtime, System.Core, ...
+                        name == "mscorlib" ||
+                        name == "netstandard";
 
                     if (include) AddAssemblyReference(loc);
                 }

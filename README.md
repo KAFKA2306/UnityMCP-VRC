@@ -34,9 +34,10 @@ most of it works for ordinary Unity development too.
 
 | Tool                     | What it does                                                         |
 | ------------------------ | ------------------------------------------------------------------- |
-| `execute_editor_command` | Compiles and runs LLM-authored C# in the Editor; returns result + logs. |
+| `execute_editor_command` | Compiles and runs LLM-authored C# in the Editor; returns result + logs. Optional `timeoutMs` (default 60s, max 300s) for heavy ops like large imports. |
 | `get_editor_state`       | Returns Unity/scene/project state on demand (bounded).              |
 | `get_logs`               | Returns recent Unity console logs.                                  |
+| `clear_logs`             | Clears the server's buffered console logs (e.g. stale errors from a failed snippet) so later `get_logs` reads aren't ambiguous. |
 | `get_command_page`       | Fetches later pages of a large `execute_editor_command` result (used automatically). |
 
 ## Getting started

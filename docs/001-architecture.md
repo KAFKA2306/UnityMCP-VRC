@@ -112,22 +112,27 @@ a log broadcast, so each `ClientConnection` wraps its writes in a `SemaphoreSlim
 | ------------------------ | ------------------------------------------------------------------------ |
 | `execute_editor_command` | Compiles and runs LLM-authored C# in the Editor; returns result + logs.  |
 | `get_editor_state`       | Returns Unity/scene/project state on demand (bounded).                   |
-| `get_logs`               | Returns recent Unity console logs from the client's buffer.              |
+| `get_logs`               | Returns recent Unity console logs from the server's buffer.              |
+| `clear_logs`             | Clears the server's buffered console logs.                               |
 | `get_command_page`       | Fetches a later page of a large `execute_editor_command` result.         |
 
 - **execute_editor_command.** The LLM authors full C# — its own `using`s, classes, and
   functions — so commands aren't limited to one-liners. Assembly references are
   auto-discovered from all loaded assemblies (UnityEngine modules and packages, VRChat /
-  UdonSharp, .NET Standard / System.Core / mscorlib, `Assembly-CSharp(-Editor)`, and
-  UnityMCP itself), so commands can use any available API with no hand-maintained list.
-  Stack traces are trimmed to the first line to save context. Runs on the main thread
-  with scoped log capture. Results over ~25k chars are **capped**: the full result is
-  cached and returned page-by-page via `get_command_page` (rationale in
-  [design decisions](002-design-decisions.md)).
+  UdonSharp, the .NET base class library — mscorlib, `System`, the `System.*` facades,
+  netstandard — `Assembly-CSharp(-Editor)`, and UnityMCP itself), so commands can use any
+  available API with no hand-maintained list. Stack traces are trimmed to the first line to
+  save context. Runs on the main thread with scoped log capture. The request timeout
+  defaults to 60s; pass `timeoutMs` (max 300s) for heavy ops. Results over ~25k chars are
+  **capped**: the full result is cached and returned page-by-page via `get_command_page`
+  (rationale in [design decisions](002-design-decisions.md)).
 - **get_editor_state.** On demand (not a continuous stream). **Capped** for large
   scenes/projects — ≤300 listed objects/assets, ≤500 hierarchy nodes, depth ≤8 — so a
   dump can't blow up the context window.
-- **get_logs.** Served from the client-side buffer that the plugin's broadcast feeds.
+- **get_logs.** Served from the server-side buffer that the plugin's broadcast feeds.
+- **clear_logs.** Empties that server-side buffer (reporting how many entries it dropped) so
+  a later `get_logs` isn't muddied by stale errors — e.g. a one-off failed compile. Doesn't
+  touch Unity, which keeps broadcasting, so the buffer refills from that point on.
 - **get_command_page.** Pulls later slices of a cached oversized command result by token +
   offset. Reads only the in-memory cache, so it works even while Unity is disconnected.
 
@@ -145,8 +150,8 @@ a log broadcast, so each `ClientConnection` wraps its writes in a `SemaphoreSlim
   a hint that the Editor is down/busy. A request already **in flight** when the socket drops is
   never silently resent — it's surfaced as *safe to retry* or *may have applied* depending on
   whether the `reloading` notice arrived first (see [design decisions](002-design-decisions.md)).
-  Cache/buffer-only tools (`get_command_page`, `get_logs`) don't call `sendRequest`, so they work
-  regardless of connection state.
+  Cache/buffer-only tools (`get_command_page`, `get_logs`, `clear_logs`) don't call `sendRequest`,
+  so they work regardless of connection state.
 - **Resources:** files in `unity-mcp-server/src/resources/text/` are copied into the
   build and exposed as MCP resources (`file:///<name>`), read at server start.
 

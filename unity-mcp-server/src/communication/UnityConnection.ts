@@ -222,6 +222,16 @@ export class UnityConnection {
     return [...this.logBuffer];
   }
 
+  // Drop every buffered log and report how many were cleared. Only touches this server's buffer;
+  // Unity keeps broadcasting new logs, so the buffer simply refills from "now" onward. Lets a
+  // caller reset stale errors (e.g. a one-off failed compile) so later get_logs reads aren't
+  // ambiguous about whether an error is current.
+  public clearLogBuffer(): number {
+    const cleared = this.logBuffer.length;
+    this.logBuffer = [];
+    return cleared;
+  }
+
   // Send a request to Unity and resolve with the data from its correlated response.
   public async sendRequest(
     type: string,
