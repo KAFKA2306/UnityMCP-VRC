@@ -26,15 +26,18 @@ single-in-flight limitation in one move.
 ## Paging via a server-side snapshot, not re-running
 
 **Context.** `execute_editor_command` returns whatever the command produces, with no bound —
-"list every GameObject" can be hundreds of KB and blow out the context window. The other
-tools cap at the source because they know their result shape; a generic command can't.
+"list every GameObject" can be hundreds of KB and blow out the context window. The shape-aware
+tools cap at the source, but those caps bound *breadth and depth*, not total bytes — a wide
+result (e.g. a GameObject whose renderer has 97 sub-mesh materials) can still overflow.
 
 **Decision.** Cap the returned text (~25k chars). On overflow, cache the *full* result
 server-side under a token and return page 1 plus a footer; a companion `get_command_page`
 tool serves later slices. Paging slices the cached snapshot rather than re-running the
 command with skip/take — because commands can have side effects (re-firing them is unsafe),
 and even read-only queries drift when collection ordering isn't stable. Pages are raw text
-slices ("concatenate, then parse") rather than per-element JSON, which keeps it general.
+slices ("concatenate, then parse") rather than per-element JSON, which keeps it general. The
+decision lives in one shared helper (`pageText`), so `get_object_details` and `get_editor_state`
+get the same byte-level backstop on top of their source caps.
 
 **Trade-off.** This protects the *model's context window*, not the wire or Unity memory — the
 full payload still crosses the socket once and lives briefly in server RAM. Doing it in C#

@@ -1,12 +1,13 @@
-// Shared, in-memory cache for oversized execute_editor_command results.
+// Shared, in-memory cache + paging for oversized tool results.
 //
-// An arbitrary command can return an unbounded blob (e.g. "list every GameObject and its
-// components"), which would blow out the model's context window in a single tool call. The
-// other tools cap at the source because they know their result shape; the generic command
-// can't, so this is the generic backstop: when a result exceeds the cap we cache the full
-// snapshot under a token and hand back only the first page. The agent pulls later pages via
-// the get_command_page tool, slicing the *cached* snapshot so paging is consistent even for
-// non-idempotent commands. See docs/002-design-decisions.md.
+// A single tool result can blow out the model's context window: an arbitrary
+// execute_editor_command blob ("list every GameObject and its components"), or a wide
+// get_object_details / get_editor_state dump. Tools that know their shape still cap at the source
+// (element counts, recursion depth) to keep the common case small, but those caps bound breadth,
+// not total bytes - so this is the generic byte-level backstop: when a serialized result exceeds
+// MAX_RESPONSE_CHARS we cache the full snapshot under a token and hand back only the first page.
+// The agent pulls later pages via the get_command_page tool, slicing the *cached* snapshot so
+// paging is consistent even for non-idempotent commands. See docs/002-design-decisions.md.
 
 /** Max chars returned in a single page before we cache + paginate (~6-8k tokens). */
 export const MAX_RESPONSE_CHARS = 25_000;
@@ -102,4 +103,17 @@ export function formatPage(token: string, page: Page): string {
   );
 
   return `${chunk}\n\n${footer.join("\n")}`;
+}
+
+/**
+ * The cap-or-page decision in one place: return `text` unchanged if it fits within
+ * MAX_RESPONSE_CHARS, otherwise cache the full snapshot and return its first page (with a footer
+ * telling the agent how to fetch the rest via get_command_page). Tools drop the result straight
+ * into a text content block.
+ */
+export function pageText(text: string): string {
+  if (text.length <= MAX_RESPONSE_CHARS) return text;
+  const token = put(text);
+  const page = getPage(token, 0, MAX_RESPONSE_CHARS)!; // just inserted — never null
+  return formatPage(token, page);
 }

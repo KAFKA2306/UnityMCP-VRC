@@ -112,8 +112,10 @@ a log broadcast, so each `ClientConnection` wraps its writes in a `SemaphoreSlim
 | ------------------------ | ------------------------------------------------------------------------ |
 | `execute_editor_command` | Compiles and runs LLM-authored C# in the Editor; returns result + logs.  |
 | `get_editor_state`       | Returns Unity/scene/project state on demand (bounded).                   |
+| `get_object_details`     | Returns one GameObject's transform, components, and size/bounds info.    |
 | `get_logs`               | Returns recent Unity console logs from the server's buffer.              |
 | `clear_logs`             | Clears the server's buffered console logs.                               |
+| `take_screenshot`        | Renders the Scene or game camera to a JPEG/PNG image block.              |
 | `get_command_page`       | Fetches a later page of a large `execute_editor_command` result.         |
 
 - **execute_editor_command.** The LLM authors full C# — its own `using`s, classes, and
@@ -128,13 +130,25 @@ a log broadcast, so each `ClientConnection` wraps its writes in a `SemaphoreSlim
   (rationale in [design decisions](002-design-decisions.md)).
 - **get_editor_state.** On demand (not a continuous stream). **Capped** for large
   scenes/projects — ≤300 listed objects/assets, ≤500 hierarchy nodes, depth ≤8 — so a
-  dump can't blow up the context window.
+  dump can't blow up the context window. An oversized result is also paged via
+  `get_command_page` as a byte-level backstop.
+- **get_object_details.** Resolves a GameObject by name or hierarchy path and reports its
+  transform (incl. world-space `lossyScale`), tag, layer, children, and per-component
+  fields/properties via reflection — plus extras the inspector can't easily give (Renderer
+  world-space bounds, mesh vertex counts, shared mesh/material names). Reflection skips
+  copy-instantiating accessors, caps collection previews, and expands user-defined types one
+  level (Unity types stay compact) to keep the payload bounded; an oversized result is paged
+  via `get_command_page`.
+- **take_screenshot.** Renders the Scene view (default) or the game camera into an offscreen
+  MSAA target and returns it as a base64 JPEG/PNG image block, for visual iteration. Runs on
+  the main thread; subject to the same unfocused-Editor throttling as other calls.
 - **get_logs.** Served from the server-side buffer that the plugin's broadcast feeds.
 - **clear_logs.** Empties that server-side buffer (reporting how many entries it dropped) so
   a later `get_logs` isn't muddied by stale errors — e.g. a one-off failed compile. Doesn't
   touch Unity, which keeps broadcasting, so the buffer refills from that point on.
-- **get_command_page.** Pulls later slices of a cached oversized command result by token +
-  offset. Reads only the in-memory cache, so it works even while Unity is disconnected.
+- **get_command_page.** Pulls later slices of any cached oversized tool result
+  (`execute_editor_command`, `get_object_details`, `get_editor_state`) by token + offset. Reads
+  only the in-memory cache, so it works even while Unity is disconnected.
 
 ## MCP server (client) internals
 

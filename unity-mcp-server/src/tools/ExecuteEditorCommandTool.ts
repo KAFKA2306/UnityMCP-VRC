@@ -4,12 +4,7 @@ import {
   ToolContext,
   ToolDefinition,
 } from "./types.js";
-import {
-  MAX_RESPONSE_CHARS,
-  formatPage,
-  getPage,
-  put,
-} from "./commandResultCache.js";
+import { pageText } from "./commandResultCache.js";
 
 export interface CommandResult {
   result: any;
@@ -175,17 +170,10 @@ public class EditorCommand
         2,
       );
 
-      // Generic backstop against context-window blowout: a command's result shape is
-      // unknown, so it has no source-level cap. If the serialized result fits, return it
-      // as-is. Otherwise cache the full snapshot and return only the first page; the agent
-      // pulls the rest via get_command_page. See docs/002-design-decisions.md.
-      if (text.length <= MAX_RESPONSE_CHARS) {
-        return { content: [{ type: "text", text }] };
-      }
-
-      const token = put(text);
-      const page = getPage(token, 0, MAX_RESPONSE_CHARS)!; // just inserted — never null
-      return { content: [{ type: "text", text: formatPage(token, page) }] };
+      // Generic backstop against context-window blowout: a command's result shape is unknown, so
+      // it has no source-level cap. pageText returns it as-is if it fits, else caches the full
+      // snapshot and returns the first page (agent fetches the rest via get_command_page).
+      return { content: [{ type: "text", text: pageText(text) }] };
     } catch (error) {
       // Map a few well-known failure substrings to clearer, more actionable messages;
       // anything else falls through to the generic wrapper below.

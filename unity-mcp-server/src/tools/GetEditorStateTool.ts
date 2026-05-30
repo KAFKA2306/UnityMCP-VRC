@@ -1,4 +1,5 @@
 import { ErrorCode, McpError } from "@modelcontextprotocol/sdk/types.js";
+import { pageText } from "./commandResultCache.js";
 import { Tool, ToolContext, ToolDefinition } from "./types.js";
 
 export interface UnityEditorState {
@@ -90,11 +91,13 @@ export class GetEditorStateTool implements Tool {
           break;
       }
 
+      // Bounded at the source (capped object/asset/hierarchy counts), but a large project can
+      // still exceed the byte cap - page it like execute_editor_command results.
       return {
         content: [
           {
             type: "text",
-            text: JSON.stringify(responseData, null, 2),
+            text: pageText(JSON.stringify(responseData, null, 2)),
           },
         ],
       };

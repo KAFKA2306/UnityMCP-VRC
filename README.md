@@ -7,7 +7,9 @@ state, and stream Unity console logs.
 
 Forked from [Arodoid/UnityMCP](https://github.com/Arodoid/UnityMCP) and extensively
 refactored, with a focus on using Claude to build **VRChat / UdonSharp** worlds — though
-most of it works for ordinary Unity development too.
+most of it works for ordinary Unity development too. The `take_screenshot` and
+`get_object_details` tools were ported from [setohima/UnityMCP-VRC](https://github.com/setohima/UnityMCP-VRC)
+and adapted to this project's connection model.
 
 <p align="center">
   <img src="docs/screenshot.png" alt="The UnityMCP Debug Window: server listening with six Claude sessions connected to one Editor" width="420"><br>
@@ -24,6 +26,9 @@ most of it works for ordinary Unity development too.
   UnityEngine, packages, VRChat/UdonSharp, project scripts — no hand-maintained list.
 - **Bounded state.** `get_editor_state` returns scene/project state on demand, capped so
   a big project can't blow up the context window.
+- **See what it's doing.** `take_screenshot` renders the Scene or game camera back to Claude
+  as an image, and `get_object_details` dumps a GameObject's components/bounds — so visual
+  iteration and inspection don't need hand-written C# each time.
 - **Survives recompiles.** Domain reloads tear the link down cleanly and clients
   auto-reconnect; requests sent during a reload wait for the link to return instead of failing.
 - **Live Debug Window.** Shows whether the server is actually listening, which clients
@@ -36,9 +41,11 @@ most of it works for ordinary Unity development too.
 | ------------------------ | ------------------------------------------------------------------- |
 | `execute_editor_command` | Compiles and runs LLM-authored C# in the Editor; returns result + logs. Optional `timeoutMs` (default 60s, max 300s) for heavy ops like large imports. |
 | `get_editor_state`       | Returns Unity/scene/project state on demand (bounded).              |
+| `get_object_details`     | Inspects one GameObject: transform, components, and size info (Renderer bounds, mesh vertex counts, shared mesh/material names). |
 | `get_logs`               | Returns recent Unity console logs.                                  |
 | `clear_logs`             | Clears the server's buffered console logs (e.g. stale errors from a failed snippet) so later `get_logs` reads aren't ambiguous. |
-| `get_command_page`       | Fetches later pages of a large `execute_editor_command` result (used automatically). |
+| `take_screenshot`        | Renders the Scene view or game camera to a JPEG/PNG image, so Claude can see the result of edits. |
+| `get_command_page`       | Fetches later pages of any oversized tool result that was paged — `execute_editor_command`, `get_object_details`, `get_editor_state` (used automatically). |
 
 ## Getting started
 

@@ -333,7 +333,8 @@ namespace UnityMCP.Editor
                 id = data.ContainsKey("id") ? data["id"]?.ToString() : null;
                 var payload = data.ContainsKey("data") && data["data"] != null ? data["data"].ToString() : "{}";
 
-                if (type == "executeEditorCommand" || type == "getEditorState")
+                if (type == "executeEditorCommand" || type == "getEditorState" ||
+                    type == "takeScreenshot" || type == "getGameObjectDetails")
                 {
                     lastRequestType = type;
                     lastRequestUtc = DateTime.UtcNow;
@@ -370,6 +371,18 @@ namespace UnityMCP.Editor
                     {
                         var stateData = await editorStateReporter.GetEditorStateData().ConfigureAwait(false);
                         await SendResponse(client, "editorState", id, stateData, token).ConfigureAwait(false);
+                        break;
+                    }
+                    case "takeScreenshot":
+                    {
+                        var shotData = await new ScreenshotCapturer().GetScreenshotData(payload).ConfigureAwait(false);
+                        await SendResponse(client, "screenshot", id, shotData, token).ConfigureAwait(false);
+                        break;
+                    }
+                    case "getGameObjectDetails":
+                    {
+                        var detailsData = await new InspectorDataReporter().GetObjectDetailsData(payload).ConfigureAwait(false);
+                        await SendResponse(client, "objectDetails", id, detailsData, token).ConfigureAwait(false);
                         break;
                     }
                     default:

@@ -150,6 +150,8 @@ export class UnityConnection {
 
       case "commandResult":
       case "editorState":
+      case "screenshot":
+      case "objectDetails":
         // Response arrived with no matching pending request (already timed out / cleared).
         break;
 

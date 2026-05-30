@@ -41,7 +41,7 @@ building, while staying useful for ordinary Unity work.
 | Plugin code       | 2 files                                       | **Broken into focused files** (connection, executor, etc.)     |
 | MCP server code   | 1 monolithic `index.ts`                       | **Thin `index.ts` + one file per tool** + resources            |
 | Resources         | —                                             | **MCP text resources** (UdonSharp / VRChat notes)              |
-| Tools             | 3                                             | 5 (`get_command_page`, `clear_logs` added)                     |
+| Tools             | 3                                             | 7 (`get_command_page`, `clear_logs`, `take_screenshot`, `get_object_details` added) |
 | License           | MIT                                           | **CC BY-NC 4.0**                                               |
 
 ## Changes by area
@@ -81,6 +81,24 @@ Pages later slices of an oversized `execute_editor_command` result from a server
 cache, rather than re-running the command (which could re-fire side effects). See
 [002 §"Paging via a server-side snapshot"](002-design-decisions.md).
 
+### `clear_logs` — new
+Empties the server-side log buffer (reporting how many entries it dropped) so a later
+`get_logs` isn't muddied by stale errors — e.g. a one-off failed compile. Buffer-only, like
+`get_command_page`, so it works regardless of connection state.
+
+### `take_screenshot` / `get_object_details` — new
+Ported from [setohima/UnityMCP-VRC] and adapted to this branch's inverted, id-correlated
+connection. The upstream port pushed unsolicited messages and parked a single global
+in-flight promise per result type, which can't serve the many concurrent Claude sessions
+this branch supports; here both tools ride the standard `sendRequest`/`SendResponse` path so
+each call is matched to its own response by id.
+- **`take_screenshot`** renders the Scene view (default) or the game camera to a JPEG/PNG
+  image block, for visual iteration on edits.
+- **`get_object_details`** returns a GameObject's transform (incl. world-space `lossyScale`),
+  tag, layer, children, and per-component fields/properties — plus size info the inspector
+  can't easily give (Renderer world-space bounds, mesh vertex counts, shared mesh/material
+  names) — so common inspections don't each need hand-written reflection C#.
+
 ### VRChat / UdonSharp support — new
 - `UdonSharpHelper` compiles C# into UdonSharp assets.
 - VRChat / UdonSharp / TextMeshPro and terrain / physics / particle assemblies wired into
@@ -106,12 +124,5 @@ cache, rather than re-running the command (which could re-fire side effects). Se
 ### License
 Relicensed from **MIT** to **Creative Commons Attribution-NonCommercial 4.0
 (CC BY-NC 4.0)**.
-
-## Not on this branch
-
-Screenshot capture (`take_screenshot`) and GameObject inspection (`get_object_details`),
-ported from [setohima/UnityMCP-VRC], were explored but are **not** part of the current
-committed tool set (`execute_editor_command`, `get_editor_state`, `get_logs`, `clear_logs`,
-`get_command_page`). Mentioned here so the omission is intentional and on the record.
 
 [setohima/UnityMCP-VRC]: https://github.com/setohima/UnityMCP-VRC
