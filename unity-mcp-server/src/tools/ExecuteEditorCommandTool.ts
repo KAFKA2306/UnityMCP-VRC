@@ -4,6 +4,12 @@ import {
   ToolContext,
   ToolDefinition,
 } from "./types.js";
+import {
+  MAX_RESPONSE_CHARS,
+  formatPage,
+  getPage,
+  put,
+} from "./commandResultCache.js";
 
 export interface CommandResult {
   result: any;
@@ -137,23 +143,28 @@ public class EditorCommand
       // Calculate execution time
       const executionTime = Date.now() - commandStartTime;
 
-      return {
-        content: [
-          {
-            type: "text",
-            text: JSON.stringify(
-              {
-                result,
-                logs: commandLogs,
-                executionTime: `${executionTime}ms`,
-                status: "success",
-              },
-              null,
-              2,
-            ),
-          },
-        ],
-      };
+      const text = JSON.stringify(
+        {
+          result,
+          logs: commandLogs,
+          executionTime: `${executionTime}ms`,
+          status: "success",
+        },
+        null,
+        2,
+      );
+
+      // Generic backstop against context-window blowout: a command's result shape is
+      // unknown, so it has no source-level cap. If the serialized result fits, return it
+      // as-is. Otherwise cache the full snapshot and return only the first page; the agent
+      // pulls the rest via get_command_page. See docs/001-execute-command-paging.md.
+      if (text.length <= MAX_RESPONSE_CHARS) {
+        return { content: [{ type: "text", text }] };
+      }
+
+      const token = put(text);
+      const page = getPage(token, 0, MAX_RESPONSE_CHARS)!; // just inserted — never null
+      return { content: [{ type: "text", text: formatPage(token, page) }] };
     } catch (error) {
       // Enhanced error handling with specific error types
       if (error instanceof Error) {

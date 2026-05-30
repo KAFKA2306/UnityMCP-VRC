@@ -1,4 +1,5 @@
 import { ExecuteEditorCommandTool } from "./ExecuteEditorCommandTool.js";
+import { GetCommandPageTool } from "./GetCommandPageTool.js";
 import { GetEditorStateTool } from "./GetEditorStateTool.js";
 import { GetLogsTool } from "./GetLogsTool.js";
 import { Tool } from "./types.js";
@@ -10,5 +11,6 @@ export function getAllTools(): Tool[] {
     new GetEditorStateTool(),
     new ExecuteEditorCommandTool(),
     new GetLogsTool(),
+    new GetCommandPageTool(),
   ];
 }

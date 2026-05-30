@@ -33,7 +33,7 @@ class UnityMCPServer {
       },
     );
 
-    // Initialize WebSocket Server for Unity communication
+    // Connect (as a client) to the WebSocket server the Unity plugin hosts.
     this.unityConnection = new UnityConnection(8080);
 
     // Error handling
@@ -130,6 +130,10 @@ class UnityMCPServer {
         );
       }
 
+      // Tools that only read server-side state (e.g. get_command_page reads the cached
+      // command result) don't need Unity, so skip the connection gate for them.
+      const requiresUnity = tool.getDefinition().requiresUnity !== false;
+
       // Try executing with retry logic for connection issues
       let retryCount = 0;
       const maxRetries = 5;
@@ -137,7 +141,7 @@ class UnityMCPServer {
 
       while (true) {
         // Verify Unity connection with detailed error message
-        if (!this.unityConnection.isConnected()) {
+        if (requiresUnity && !this.unityConnection.isConnected()) {
           if (retryCount < maxRetries) {
             retryCount++;
             console.error(`Unity Editor not connected. Retrying in 5 seconds... (${retryCount}/${maxRetries})`);
@@ -174,9 +178,10 @@ class UnityMCPServer {
     await this.server.connect(transport);
     console.error("Unity MCP server running on stdio");
 
-    // Wait for WebSocket server to be ready
+    // Brief settle before run() returns. The Unity client connects in the background
+    // and reconnects on its own, so there's nothing to block on here.
     await new Promise<void>((resolve) => {
-      setTimeout(resolve, 100); // Small delay to ensure WebSocket server is initialized
+      setTimeout(resolve, 100);
     });
   }
 }
