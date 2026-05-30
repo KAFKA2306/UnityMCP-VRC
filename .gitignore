@@ -7,10 +7,11 @@
 [Ll]ogs/
 [Uu]ser[Ss]ettings/
 
-# Unity3D generated meta files
-*.pidb.meta
-*.pdb.meta
-*.mdb.meta
+# Unity3D generated meta files. This repo is the plugin *source*: the whole
+# folder is dragged into a Unity project, which regenerates .meta files on
+# import. Nothing here is referenced by GUID (all editor-only scripts), so
+# tracking them just adds churn.
+*.meta
 
 # Unity3D generated file on crash reports
 sysinfo.txt
