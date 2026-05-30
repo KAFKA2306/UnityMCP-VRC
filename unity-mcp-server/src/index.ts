@@ -17,6 +17,7 @@ class UnityMCPServer {
   private server: Server;
   private unityConnection: UnityConnection;
   private initialized = false;
+  private shuttingDown = false;
 
   constructor() {
     this.server = new Server(
@@ -35,12 +36,10 @@ class UnityMCPServer {
     // Connect (as a client) to the WebSocket server the Unity plugin hosts.
     this.unityConnection = new UnityConnection(8080);
 
-    // Log MCP-layer errors, and tear down the Unity connection cleanly on Ctrl-C.
+    // Log MCP-layer errors, and exit cleanly when interrupted or asked to terminate.
     this.server.onerror = (error) => console.error("[MCP Error]", error);
-    process.on("SIGINT", async () => {
-      await this.cleanup();
-      process.exit(0);
-    });
+    process.on("SIGINT", () => this.shutdown(0));
+    process.on("SIGTERM", () => this.shutdown(0));
   }
 
   /** Initialize the server asynchronously */
@@ -146,12 +145,35 @@ class UnityMCPServer {
     await this.server.close();
   }
 
+  /**
+   * Tear down and exit. The client owns our lifetime, so when it disconnects we must exit rather
+   * than linger: UnityConnection's 3s reconnect timer keeps the event loop alive indefinitely,
+   * which previously left zombie servers endlessly reconnecting to the Editor and storming it on
+   * every domain reload. Idempotent, and force-exits if a graceful close stalls.
+   */
+  private shutdown(code = 0): void {
+    if (this.shuttingDown) return;
+    this.shuttingDown = true;
+    const force = setTimeout(() => process.exit(code), 2000);
+    force.unref();
+    this.cleanup()
+      .catch(() => {})
+      .then(() => process.exit(code));
+  }
+
   async run() {
     await this.initialize();
-    
+
     const transport = new StdioServerTransport();
     await this.server.connect(transport);
     console.error("Unity MCP server running on stdio");
+
+    // The client owns our lifetime: when it goes away, its end of our stdio closes. Exit then, so
+    // we don't linger reconnecting to Unity. server.onclose fires on transport close; the stdin
+    // listeners are a backstop in case the transport doesn't surface the EOF itself.
+    this.server.onclose = () => this.shutdown(0);
+    process.stdin.on("end", () => this.shutdown(0));
+    process.stdin.on("close", () => this.shutdown(0));
 
     // Brief settle before run() returns. The Unity client connects in the background
     // and reconnects on its own, so there's nothing to block on here.

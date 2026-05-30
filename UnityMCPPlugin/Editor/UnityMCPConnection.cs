@@ -28,6 +28,11 @@ namespace UnityMCP.Editor
 
         private static TcpListener listener;
         private static bool isListening;
+
+        // Set at the very start of a domain-reload teardown. While true, log broadcasts skip sending
+        // so we don't pile async writes onto sockets we're closing (a wedged one would otherwise keep
+        // a thread in a native send and hold up the domain unload). Reset when the server (re)starts.
+        private static volatile bool tearingDown;
         private static CancellationTokenSource serverCts;
         private static readonly List<ClientConnection> clients = new List<ClientConnection>();
 
@@ -146,6 +151,9 @@ namespace UnityMCP.Editor
         // constructor runs again in the new domain).
         private static void OnBeforeAssemblyReload()
         {
+            // Stop background log broadcasts first so the disconnect logs we're about to generate
+            // don't kick off fresh async sends to sockets that are closing.
+            tearingDown = true;
             // Announce the reload BEFORE dropping sockets so clients can distinguish a clean reload
             // (queued requests were dropped before they ran - safe to retry) from an arbitrary
             // disconnect (an in-flight command may have applied). Best-effort and synchronous: the
@@ -167,16 +175,24 @@ namespace UnityMCP.Editor
                 snapshot = new List<ClientConnection>(clients);
             }
 
+            // Best-effort and strictly time-boxed: this runs on the main thread while the domain is
+            // unloading, so the whole notify must stay snappy no matter how many clients are
+            // attached. Each send is individually bounded (see TrySendTextBlocking); this also caps
+            // the total, so a roomful of wedged clients can't add up to a long main-thread stall.
             var message = JsonConvert.SerializeObject(new { type = "reloading" });
+            var deadlineUtc = DateTime.UtcNow.AddMilliseconds(1000);
             foreach (var c in snapshot)
             {
-                try { c.TrySendTextBlocking(message); } catch { }
+                int remainingMs = (int)(deadlineUtc - DateTime.UtcNow).TotalMilliseconds;
+                if (remainingMs <= 0) break; // out of budget - skip the rest; StopServer still closes them
+                try { c.TrySendTextBlocking(message, Math.Min(200, remainingMs)); } catch { }
             }
         }
 
         private static void StartServer()
         {
             if (isListening) return;
+            tearingDown = false;
 
             try
             {
@@ -429,6 +445,8 @@ namespace UnityMCP.Editor
         // Push a log line to every connected client (each MCP server keeps its own buffer).
         private static void BroadcastLog(LogEntry logEntry)
         {
+            if (tearingDown) return; // mid-reload: don't start sends to sockets we're closing
+
             List<ClientConnection> snapshot;
             lock (clients)
             {

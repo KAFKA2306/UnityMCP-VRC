@@ -45,6 +45,24 @@ namespace UnityMCP.Editor
         public static async Task<ClientConnection> AcceptAsync(TcpClient tcp, CancellationToken token)
         {
             tcp.NoDelay = true;
+            // Cap synchronous sends at the socket level (SO_SNDTIMEO). The only synchronous send is
+            // the teardown "reloading" notify (TrySendTextBlocking) on the main thread during
+            // beforeAssemblyReload. Without this, a write to a wedged client (its receive buffer
+            // full, so the TCP send window is zero) blocks until the OS abandons the send - ~2
+            // minutes - which freezes the whole domain reload (the old domain can't unload while a
+            // thread sits in that native write). Unity's Mono does NOT honor NetworkStream.
+            // WriteTimeout for this, so we set the socket option directly. Async sends (normal
+            // responses, log broadcasts) ignore SO_SNDTIMEO, so this only bounds teardown.
+            try { tcp.SendTimeout = 1000; } catch { }
+
+            // Abortive close: on Close() send a RST and discard buffered data immediately instead of a
+            // graceful FIN. Teardown (StopServer during beforeAssemblyReload) must never wait on the
+            // network, and a graceful close to a wedged client can stall on the TCP send/timeout. A RST
+            // also forces any in-flight send (sync OR async) on that socket to error out at once, so no
+            // thread can sit in a native socket op and hold up the domain unload. Clients just see a
+            // reset and reconnect, which they already handle.
+            try { tcp.LingerState = new LingerOption(true, 0); } catch { }
+
             var stream = tcp.GetStream();
             if (!await PerformHandshake(stream, token).ConfigureAwait(false))
             {
@@ -67,7 +85,7 @@ namespace UnityMCP.Editor
         // domain is about to unload and async writes may not flush in time. Writes the frame
         // directly with a short, bounded wait for the send lock; never throws. Returns false if it
         // couldn't send (a write was already in flight, or the socket is gone).
-        public bool TrySendTextBlocking(string message, int timeoutMs = 500)
+        public bool TrySendTextBlocking(string message, int timeoutMs = 250)
         {
             var frame = BuildFrame(0x1, Encoding.UTF8.GetBytes(message));
             bool locked = false;
@@ -75,16 +93,25 @@ namespace UnityMCP.Editor
             {
                 locked = sendLock.Wait(timeoutMs);
                 if (!locked) return false; // a write is in flight; don't risk interleaving frames
+
+                // Bound the socket write itself, not just the lock wait above. A synchronous Write
+                // to a wedged client (its receive buffer full, so the TCP send window is zero) has
+                // NO timeout by default and blocks until the OS abandons the send - which can be
+                // minutes. This runs on the main thread during beforeAssemblyReload, so an unbounded
+                // write there freezes the entire domain reload (observed: a ~7-minute editor hang
+                // under a reconnect storm). WriteTimeout makes the Write throw instead.
+                try { stream.WriteTimeout = timeoutMs; } catch { }
                 stream.Write(frame, 0, frame.Length);
                 stream.Flush();
                 return true;
             }
             catch
             {
-                return false; // socket already gone; nothing to do
+                return false; // socket already gone, or the bounded write timed out; nothing to do
             }
             finally
             {
+                try { stream.WriteTimeout = Timeout.Infinite; } catch { }
                 if (locked) sendLock.Release();
             }
         }
