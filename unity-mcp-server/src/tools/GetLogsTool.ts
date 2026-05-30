@@ -5,7 +5,7 @@ export class GetLogsTool implements Tool {
     return {
       name: "get_logs",
       description:
-        "Retrieve and filter Unity Editor logs with comprehensive filtering options. This tool provides access to editor logs, console messages, warnings, errors, and exceptions with powerful filtering capabilities.",
+        "Retrieve recent Unity console logs (Log, Warning, Error, Exception) from this server's buffer, filtering by type, message or stack-trace substring, timestamp range, and which fields to return. The buffer is fed by Unity's log broadcast and holds roughly the last 1000 entries.",
       category: "Debugging",
       tags: ["unity", "editor", "logs", "debugging", "console"],
       inputSchema: {

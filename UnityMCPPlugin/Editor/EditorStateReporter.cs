@@ -52,7 +52,8 @@ namespace UnityMCP.Editor
                 var activeGameObjects = new List<string>();
                 var selectedObjects = new List<string>();
 
-                // Use FindObjectsByType instead of FindObjectsOfType
+                // FindObjectsByType with SortMode.None is the modern, unsorted (so cheaper)
+                // replacement for the now-deprecated FindObjectsOfType.
                 var foundObjects = GameObject.FindObjectsByType<GameObject>(FindObjectsSortMode.None);
                 if (foundObjects != null)
                 {

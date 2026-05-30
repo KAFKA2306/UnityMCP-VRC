@@ -19,7 +19,6 @@ class UnityMCPServer {
   private initialized = false;
 
   constructor() {
-    // Initialize MCP Server
     this.server = new Server(
       {
         name: "unity-mcp-server",
@@ -36,7 +35,7 @@ class UnityMCPServer {
     // Connect (as a client) to the WebSocket server the Unity plugin hosts.
     this.unityConnection = new UnityConnection(8080);
 
-    // Error handling
+    // Log MCP-layer errors, and tear down the Unity connection cleanly on Ctrl-C.
     this.server.onerror = (error) => console.error("[MCP Error]", error);
     process.on("SIGINT", async () => {
       await this.cleanup();
@@ -86,7 +85,6 @@ class UnityMCPServer {
 
         const resourceContext: ResourceContext = {
           unityConnection: this.unityConnection,
-          // Add any other context properties needed
         };
 
         const content = await resource.getContents(resourceContext);
@@ -107,19 +105,18 @@ class UnityMCPServer {
   private setupTools() {
     const tools = getAllTools();
 
-    // List available tools with comprehensive documentation
+    // Advertise the available tools and their schemas.
     this.server.setRequestHandler(ListToolsRequestSchema, async () => ({
       tools: tools.map((tool) => tool.getDefinition()),
     }));
 
-    // Handle tool calls with enhanced validation and error handling
+    // Dispatch a tool call to the matching tool.
     this.server.setRequestHandler(CallToolRequestSchema, async (request) => {
       const { name, arguments: args } = request.params;
 
-      // Find the requested tool
       const tool = tools.find((t) => t.getDefinition().name === name);
 
-      // Validate tool exists with helpful error message
+      // Unknown tool name: fail with the list of valid ones.
       if (!tool) {
         const availableTools = tools.map((t) => t.getDefinition().name);
         throw new McpError(

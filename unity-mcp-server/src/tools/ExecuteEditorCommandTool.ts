@@ -29,7 +29,7 @@ export class ExecuteEditorCommandTool implements Tool {
     return {
       name: "execute_editor_command",
       description:
-        "Execute arbitrary C# code file within the Unity Editor context. This powerful tool allows for direct manipulation of the Unity Editor, GameObjects, components, and project assets using the Unity Editor API.",
+        "Compile and run C# inside the running Unity Editor; returns the command's result plus any console logs it produced. Has full access to the UnityEditor and UnityEngine APIs, so it can inspect or modify GameObjects, components, and project assets. Oversized results are paged - fetch the rest with get_command_page.",
       category: "Editor Control",
       tags: ["unity", "editor", "command", "c#", "scripting"],
       inputSchema: {
@@ -66,7 +66,8 @@ The code must have a EditorCommand class with a static Execute method that retur
           },
           {
             error: "Timeout",
-            handling: "Command execution timeout after 5 seconds",
+            handling:
+              "Request times out after 60 seconds (e.g. the Editor stayed unfocused or busy)",
           },
         ],
       },
@@ -93,14 +94,13 @@ public class EditorCommand
 }`,
           },
           output:
-            '{ "result": true, "logs": ["[UnityMCP] Command executed successfully"] }',
+            '{ "result": "Success", "logs": [...], "executionTime": "12ms", "status": "success" }',
         },
       ],
     };
   }
 
   async execute(args: any, context: ToolContext) {
-    // Validate code parameter
     if (!args?.code) {
       throw new McpError(
         ErrorCode.InvalidParams,
@@ -123,7 +123,8 @@ public class EditorCommand
     }
 
     try {
-      // Clear previous logs and set command start time
+      // Mark the current end of the log buffer (and start the clock) so we can later slice out
+      // just the logs and timing for this one command.
       const startLogIndex = context.logBuffer.length;
       const commandStartTime = Date.now();
 
@@ -140,7 +141,6 @@ public class EditorCommand
         .slice(startLogIndex)
         .filter((log) => log.message.includes("[UnityMCP]"));
 
-      // Calculate execution time
       const executionTime = Date.now() - commandStartTime;
 
       const text = JSON.stringify(
@@ -166,13 +166,13 @@ public class EditorCommand
       const page = getPage(token, 0, MAX_RESPONSE_CHARS)!; // just inserted — never null
       return { content: [{ type: "text", text: formatPage(token, page) }] };
     } catch (error) {
-      // Enhanced error handling with specific error types
+      // Map a few well-known failure substrings to clearer, more actionable messages;
+      // anything else falls through to the generic wrapper below.
       if (error instanceof Error) {
         if (error.message.includes("timed out")) {
           throw new McpError(ErrorCode.InternalError, error.message);
         }
 
-        // Check for common Unity-specific errors
         if (error.message.includes("NullReferenceException")) {
           throw new McpError(
             ErrorCode.InvalidParams,

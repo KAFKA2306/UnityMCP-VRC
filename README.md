@@ -9,6 +9,11 @@ Forked from [Arodoid/UnityMCP](https://github.com/Arodoid/UnityMCP) and extensiv
 refactored, with a focus on using Claude to build **VRChat / UdonSharp** worlds — though
 most of it works for ordinary Unity development too.
 
+<p align="center">
+  <img src="docs/screenshot.png" alt="The UnityMCP Debug Window: server listening with six Claude sessions connected to one Editor" width="420"><br>
+  <em>The Debug Window — six Claude sessions attached to a single Editor on <code>ws://localhost:8080</code>.</em>
+</p>
+
 ## Highlights
 
 - **One Editor, many Claude sessions.** The plugin hosts the server, so any number of
@@ -32,6 +37,7 @@ most of it works for ordinary Unity development too.
 | `execute_editor_command` | Compiles and runs LLM-authored C# in the Editor; returns result + logs. |
 | `get_editor_state`       | Returns Unity/scene/project state on demand (bounded).              |
 | `get_logs`               | Returns recent Unity console logs.                                  |
+| `get_command_page`       | Fetches later pages of a large `execute_editor_command` result (used automatically). |
 
 ## Getting started
 
@@ -85,7 +91,8 @@ More detail in [docs/001 — Architecture](docs/001-architecture.md#known-limita
 - **[001 — Architecture](docs/001-architecture.md)** — how it works now: connection
   model, wire protocol, threading, lifecycle, tools, file map, limits. Start here.
 - [002 — Design decisions](docs/002-design-decisions.md) — the *why* behind the
-  architecture: the inverted connection, server-side paging, and the heartbeat call.
+  architecture: the inverted connection, server-side paging, domain-reload handling, and
+  the heartbeat call.
 - [003 — Changes from the original fork](docs/003-changes-from-upstream.md) — how this
   repo diverges from upstream [Arodoid/UnityMCP](https://github.com/Arodoid/UnityMCP):
   the inverted topology, VRChat/UdonSharp support, paging, and the relicense.

@@ -175,8 +175,6 @@ namespace UnityMCP.Editor
 
                     if (include) AddAssemblyReference(loc);
                 }
-
-                // Debug.Log("Added Assembly References:" + string.Join(", ", options.ReferencedAssemblies));
             }
             catch (Exception e)
             {
@@ -189,7 +187,6 @@ namespace UnityMCP.Editor
                 var results = provider.CompileAssemblyFromSource(options, code);
                 if (results.Errors.HasErrors)
                 {
-                    //Debug.LogError($"Assembly references: {string.Join(", ", options.ReferencedAssemblies)}");
                     foreach (CompilerError error in results.Errors)
                     {
                         Debug.LogError($"Error {error.ErrorNumber}: {error.ErrorText}, Line {error.Line}");

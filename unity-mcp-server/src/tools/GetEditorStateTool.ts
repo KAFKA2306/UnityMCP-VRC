@@ -19,7 +19,7 @@ export class GetEditorStateTool implements Tool {
     return {
       name: "get_editor_state",
       description:
-        "Retrieve the current state of the Unity Editor, including active GameObjects, selection state, play mode status, scene hierarchy, project structure, and assets. This tool provides a comprehensive snapshot of the editor's current context. Note: while the Unity Editor window is unfocused its update loop is throttled, so a call may not complete until you refocus the Editor (or set Preferences > General > Interaction Mode to 'No Throttling').",
+        "Retrieve a snapshot of the Unity Editor's current state: active GameObjects, current selection, play-mode status, scene hierarchy, and the project's scenes/assets. The result is bounded for large scenes and projects (capped object and hierarchy counts) so it can't flood the context window. Note: while the Editor window is unfocused its update loop is throttled, so a call may not complete until you refocus the Editor (or set Preferences > General > Interaction Mode to 'No Throttling').",
       category: "Editor State",
       tags: ["unity", "editor", "state", "hierarchy", "project"],
       inputSchema: {
@@ -82,7 +82,7 @@ export class GetEditorStateTool implements Tool {
         throw new Error(editorState.error);
       }
 
-      // Process the response based on format
+      // "Raw" is the only format today; the switch leaves room for trimmed variants later.
       let responseData: any;
       switch (format) {
         case "Raw":
@@ -99,7 +99,7 @@ export class GetEditorStateTool implements Tool {
         ],
       };
     } catch (error) {
-      // Enhanced error handling
+      // Surface timeouts as-is (already actionable); wrap anything else.
       if (error instanceof Error && error.message.includes("timed out")) {
         throw new McpError(ErrorCode.InternalError, error.message);
       }

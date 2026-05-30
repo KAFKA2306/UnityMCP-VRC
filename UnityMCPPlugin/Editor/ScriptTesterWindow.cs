@@ -5,19 +5,20 @@ using System.Collections.Generic;
 using UnityMCP.Editor;
 using Newtonsoft.Json;
 
-/** Used to diagnose why code LLM generates can't run */
+/** Manual runner for EditorCommand snippets: paste C# and execute it in-Editor to diagnose
+ *  why LLM-generated code won't compile or run, without going through the MCP round-trip. */
 public class ScriptTester : EditorWindow
 {
     private string scriptCode = "using UnityEngine;\nusing UnityEditor;\nusing System;\nusing System.Collections.Generic;\nusing System.Linq;\n\npublic class EditorCommand\n{\n    public static object Execute()\n    {\n        // Your code here\n        return \"Hello from Script Tester!\";\n    }\n}";
     private Vector2 codeScrollPosition;
     private Vector2 resultScrollPosition;
-    private Vector2 logsScrollPosition; // Added scroll position for logs
-    private Vector2 mainScrollPosition; // Added scroll position for the entire window
+    private Vector2 logsScrollPosition; // Scroll position for the logs section
+    private Vector2 mainScrollPosition; // Scroll position for the whole window
     private string resultText = "";
     private bool hasError = false;
     private List<string> logs = new List<string>();
-    private float codeEditorHeight = 400f; // Store the height of the code editor
-    private bool isDraggingSplitter = false; // Track if user is dragging the splitter
+    private float codeEditorHeight = 400f; // Height of the code editor pane (drag-resizable via the splitter)
+    private bool isDraggingSplitter = false; // True while the user is dragging the splitter
     
     [MenuItem("UnityMCP/Script Tester")]
     public static void ShowWindow()
@@ -122,7 +123,7 @@ public class ScriptTester : EditorWindow
                 processedCode = ProcessJsonStringCode(scriptCode);
             }
             
-            // Execute the code using CSEditorHelper
+            // Compile and run the snippet through the same path the MCP command uses.
             var result = UnityMCP.Editor.EditorCommandExecutor.CompileAndExecute(processedCode);
             
             // Format the result

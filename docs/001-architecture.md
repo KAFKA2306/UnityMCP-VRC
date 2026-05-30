@@ -79,10 +79,11 @@ thread via `EditorUtilities.RunOnMainThread`, which:
 - enqueues the work and drains the queue on every `EditorApplication.update` tick;
 - **defers while Unity is compiling** (`EditorApplication.isCompiling`), so work runs
   against stable post-compile state instead of racing a recompile;
-- has a generous timeout (`MainThreadTimeoutMs`, 55s). The Editor throttles (and on some
-  platforms effectively suspends) its loop while **unfocused**, so a queued request may
-  not run until you refocus the window. On timeout it throws an actionable message
-  (focus the Editor, or set *Preferences > General > Interaction Mode > No Throttling*).
+- has a generous timeout (`MainThreadTimeoutMs`, 55s) but fast-fails sooner when it can: the
+  Editor throttles (and on some platforms suspends) its loop while **unfocused**, so a
+  thread-pool watchdog notices the loop hasn't ticked for a few seconds and throws an actionable
+  message rather than waiting out the full timeout (focus the Editor, or set *Preferences >
+  General > Interaction Mode > No Throttling*).
 
 A WebSocket forbids overlapping `SendAsync` calls on one socket, and a response can race
 a log broadcast, so each `ClientConnection` wraps its writes in a `SemaphoreSlim(1,1)`.
@@ -91,20 +92,15 @@ a log broadcast, so each `ClientConnection` wraps its writes in a `SemaphoreSlim
 
 - **Start.** `[InitializeOnLoad]` runs the static constructor on editor load and after
   every domain reload; it starts the server via `EditorApplication.delayCall`.
-- **Teardown on reload.** A recompile (including edits made by `execute_editor_command`)
-  ends in a domain reload that wipes all managed state — the listener, every client
-  socket, and the main-thread queue. `AssemblyReloadEvents.beforeAssemblyReload` first
-  broadcasts a `reloading` notice to every client (a best-effort *blocking* send, since the
-  domain is unloading and async writes might not flush), then calls `StopServer`: cancel the
-  token, **close every accepted socket — including any still mid-handshake** — and stop the
-  listener. Closing (not the token) is what unblocks a socket read on Mono, so a socket that isn't
-  a finished client yet must still be tracked and closed or it pins a thread and stalls the reload
-  (see [design decisions](002-design-decisions.md)). A client that received the notice reports
-  its still-pending requests as *dropped before running — safe to retry* (they were only queued;
-  the loop defers while compiling, then the reload wipes the queue); a close **without** a
-  preceding notice is an arbitrary drop, reported as *may have applied — check state*. Either way
-  requests fail fast instead of waiting out a timeout; requests not yet sent wait for the
-  reconnect instead of failing.
+- **Teardown on reload.** A recompile ends in a domain reload that wipes all managed state —
+  the listener, every client socket, and the main-thread queue. `beforeAssemblyReload` first
+  broadcasts a `reloading` notice (a best-effort *blocking* send, since async writes may not
+  flush as the domain unloads), then `StopServer` cancels the token and **closes every accepted
+  socket, including any still mid-handshake** — closing, not the token, is what unblocks a Mono
+  socket read, so an untracked mid-handshake socket would pin a thread and stall the reload (see
+  [design decisions](002-design-decisions.md)). Clients that got the notice report still-pending
+  requests as *safe to retry*; a close with no notice is reported as *may have applied — check
+  state*. Requests not yet sent wait out the reconnect instead (below).
 - **Reconnect.** The static constructor restarts the server in the new domain; the MCP
   client reconnects (~3s poll), so a recompile is a brief blip rather than a hang.
 - **Manual restart.** The Debug Window's *Restart Server* button calls `RetryConnection`
@@ -145,13 +141,12 @@ a log broadcast, so each `ClientConnection` wraps its writes in a `SemaphoreSlim
   arrives (or rejects on timeout). On socket close it rejects all pending with a retry
   hint.
 - `sendRequest` waits (bounded, ~20s — `connectWaitMs`) for a live socket before sending, so a
-  call issued during a domain reload pauses for the reconnect instead of failing; past that it
-  fails with a hint that the Editor is down/busy. A request already in flight when the socket
-  dropped is **not** silently resent: if Unity sent the `reloading` notice first, the request was
-  only queued and never ran, so it's reported as *safe to retry*; otherwise it's an arbitrary drop
-  reported as *may have applied — check state*, since the command could be non-idempotent (see
-  [design decisions](002-design-decisions.md)). Cache/buffer-only tools (`get_command_page`,
-  `get_logs`) don't call `sendRequest`, so they work regardless of connection state.
+  call issued during a reload pauses for the reconnect instead of failing; past that it fails with
+  a hint that the Editor is down/busy. A request already **in flight** when the socket drops is
+  never silently resent — it's surfaced as *safe to retry* or *may have applied* depending on
+  whether the `reloading` notice arrived first (see [design decisions](002-design-decisions.md)).
+  Cache/buffer-only tools (`get_command_page`, `get_logs`) don't call `sendRequest`, so they work
+  regardless of connection state.
 - **Resources:** files in `unity-mcp-server/src/resources/text/` are copied into the
   build and exposed as MCP resources (`file:///<name>`), read at server start.
 
@@ -174,7 +169,7 @@ a log broadcast, so each `ClientConnection` wraps its writes in a `SemaphoreSlim
 
 | Path                          | Responsibility                                          |
 | ----------------------------- | ------------------------------------------------------- |
-| `index.ts`                    | MCP wiring: list/call tools, list/read resources, retry-on-disconnected. |
+| `index.ts`                    | MCP wiring: list/call tools, list/read resources.       |
 | `communication/UnityConnection.ts` | Reconnecting WS client + id-keyed pending map.     |
 | `tools/*.ts`                  | One file per tool behind a common `Tool` interface.     |
 | `tools/commandResultCache.ts` | Shared cache + paging for oversized command results.    |
