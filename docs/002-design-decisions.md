@@ -64,6 +64,26 @@ the narrow window where a command ran but its response was lost before the notic
 stay pessimistic and ask the caller to check state. We also accept a ~20s ceiling: beyond it we
 assume the Editor is down/busy and fail with a hint rather than hang.
 
+## Teardown closes sockets directly (it can't trust the cancel token)
+
+**Context.** A domain reload can't complete while a managed thread sits in a blocking call. The
+accept/receive/handshake loops `await` socket reads on the thread pool and we cancel a shared
+`CancellationToken` on teardown — but **Mono doesn't observe that token on a socket read**; the
+read returns only when the socket is *closed*. The MCP client reconnects every ~3s, so a reload
+very often fires while a socket is mid-handshake — and that socket isn't a finished client yet. An
+early version closed only the *connected* clients, leaving the mid-handshake socket blocked,
+pinning a thread-pool thread in a native read and stalling the reload for ~17s+ (visible as a big
+"Untracked" span under *Domain Reload Profiling* in `Editor.log`).
+
+**Decision.** Track *every* accepted socket — from accept until its handler exits, including the
+pre-handshake window — and have `StopServer` close them all (connected or not), plus the listener.
+Closing is the real unblock mechanism; cancelling the token is only a best-effort nudge. A handler
+that happens to start *after* teardown checks the flag and closes its socket without ever reading.
+
+**Trade-off.** A little extra bookkeeping (a set of raw sockets beside the client list) and a
+benign "read threw on a closed socket" per socket during teardown (suppressed while tearing down).
+In return, reloads stop waiting on dead sockets.
+
 ## No server-initiated heartbeat
 
 **Context.** Inverting the connection already delivered most of what a planned

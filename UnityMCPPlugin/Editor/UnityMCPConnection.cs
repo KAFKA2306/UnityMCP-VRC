@@ -31,6 +31,14 @@ namespace UnityMCP.Editor
         private static CancellationTokenSource serverCts;
         private static readonly List<ClientConnection> clients = new List<ClientConnection>();
 
+        // Every accepted TCP socket, tracked from accept until HandleClient finishes - including the
+        // mid-handshake window before it's promoted to a ClientConnection (and added to `clients`).
+        // Teardown must close these directly: a socket read blocked in the handshake does NOT observe
+        // the cancellation token on Mono, so closing the socket is the only thing that unblocks it. An
+        // untracked mid-handshake socket was pinning a thread-pool thread in a native read and stalling
+        // domain reload for ~17s+ (the old domain can't unload while a thread sits in that read).
+        private static readonly HashSet<TcpClient> acceptedSockets = new HashSet<TcpClient>();
+
         private static string lastErrorMessage = "";
         private static readonly Queue<LogEntry> logBuffer = new Queue<LogEntry>();
         private static readonly int maxLogBufferSize = 1000;
@@ -208,6 +216,18 @@ namespace UnityMCP.Editor
                 clients.Clear();
             }
 
+            // Close EVERY accepted socket, including any still mid-handshake (not yet in `clients`).
+            // This is the one that prevented the reload stall: a blocked handshake read only unblocks
+            // when its socket is closed (the cancel token above doesn't reach a Mono socket read).
+            lock (acceptedSockets)
+            {
+                foreach (var s in acceptedSockets)
+                {
+                    try { s.Close(); } catch { }
+                }
+                acceptedSockets.Clear();
+            }
+
             try { listener?.Stop(); } catch { }
             listener = null;
         }
@@ -238,9 +258,22 @@ namespace UnityMCP.Editor
 
         private static async Task HandleClient(TcpClient tcp, CancellationToken token)
         {
+            // Track the raw socket immediately - BEFORE the handshake read - so teardown can always
+            // close it (closing is what unblocks a Mono socket read; the token won't).
+            lock (acceptedSockets) acceptedSockets.Add(tcp);
+
             ClientConnection client = null;
             try
             {
+                // If we're already tearing down, don't even start a handshake read - it could block on
+                // a socket the StopServer close-loop has already passed, pinning a thread through the
+                // reload. (Closing here is safe whether or not StopServer also closes it.)
+                if (token.IsCancellationRequested || !isListening)
+                {
+                    try { tcp.Close(); } catch { }
+                    return;
+                }
+
                 client = await ClientConnection.AcceptAsync(tcp, token).ConfigureAwait(false);
                 if (client == null)
                 {
@@ -269,10 +302,13 @@ namespace UnityMCP.Editor
             }
             catch (Exception e)
             {
-                Debug.LogError($"[UnityMCP] Client error: {e.Message}");
+                // While tearing down (isListening == false) the read throwing on a closed socket is
+                // expected - don't surface it as an error.
+                if (isListening) Debug.LogError($"[UnityMCP] Client error: {e.Message}");
             }
             finally
             {
+                lock (acceptedSockets) acceptedSockets.Remove(tcp);
                 if (client != null)
                 {
                     lock (clients) clients.Remove(client);

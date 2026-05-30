@@ -96,7 +96,10 @@ a log broadcast, so each `ClientConnection` wraps its writes in a `SemaphoreSlim
   socket, and the main-thread queue. `AssemblyReloadEvents.beforeAssemblyReload` first
   broadcasts a `reloading` notice to every client (a best-effort *blocking* send, since the
   domain is unloading and async writes might not flush), then calls `StopServer`: cancel the
-  token, close all client sockets, stop the listener. A client that received the notice reports
+  token, **close every accepted socket — including any still mid-handshake** — and stop the
+  listener. Closing (not the token) is what unblocks a socket read on Mono, so a socket that isn't
+  a finished client yet must still be tracked and closed or it pins a thread and stalls the reload
+  (see [design decisions](002-design-decisions.md)). A client that received the notice reports
   its still-pending requests as *dropped before running — safe to retry* (they were only queued;
   the loop defers while compiling, then the reload wipes the queue); a close **without** a
   preceding notice is an arbitrary drop, reported as *may have applied — check state*. Either way
