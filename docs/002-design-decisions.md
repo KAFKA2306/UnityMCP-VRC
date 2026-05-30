@@ -41,6 +41,29 @@ full payload still crosses the socket once and lives briefly in server RAM. Doin
 would spare those too, but a plugin-side cache is wiped by every domain reload and needs a
 protocol change; not worth it for the actual goal.
 
+## Riding out a domain reload (wait, but don't resend)
+
+**Context.** Writing a `.cs` file from a command triggers a recompile and domain reload, which
+drops the WebSocket mid-session. A command issued in that window would otherwise fail with a
+bare "not connected," forcing the caller to notice and retry — painful in a workflow where
+nearly every script edit causes a reload.
+
+**Decision.** `sendRequest` waits (bounded, ~20s) for the socket to come back before sending,
+so a not-yet-sent request just pauses for the reconnect and then goes through. But a request
+that was *already on the wire* when the socket dropped is **not** silently resent — silently
+re-running it could double-apply a non-idempotent edit. To sharpen that case, Unity broadcasts a
+`reloading` notice just before it closes the sockets: that fires on the main thread, so nothing
+is mid-execution, which means a request still pending when the socket then closes was only
+*queued* and never ran. The client reports those as *safe to retry*, reserving the pessimistic
+*may have applied — check state* wording for a drop with **no** such notice.
+
+**Trade-off.** The common case recovers transparently (the command that *triggers* the reload
+finishes first, and the *next* one races the reconnect — so it never ran and is safe to send).
+The genuinely ambiguous case shrinks to an *un-announced* drop (Editor killed, network blip, or
+the narrow window where a command ran but its response was lost before the notice) — there we
+stay pessimistic and ask the caller to check state. We also accept a ~20s ceiling: beyond it we
+assume the Editor is down/busy and fail with a hint rather than hang.
+
 ## No server-initiated heartbeat
 
 **Context.** Inverting the connection already delivered most of what a planned

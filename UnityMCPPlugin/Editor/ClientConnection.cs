@@ -63,6 +63,32 @@ namespace UnityMCP.Editor
             return SendFrameAsync(0x1, Encoding.UTF8.GetBytes(message), token);
         }
 
+        // Best-effort synchronous text send for teardown (e.g. beforeAssemblyReload), where the
+        // domain is about to unload and async writes may not flush in time. Writes the frame
+        // directly with a short, bounded wait for the send lock; never throws. Returns false if it
+        // couldn't send (a write was already in flight, or the socket is gone).
+        public bool TrySendTextBlocking(string message, int timeoutMs = 500)
+        {
+            var frame = BuildFrame(0x1, Encoding.UTF8.GetBytes(message));
+            bool locked = false;
+            try
+            {
+                locked = sendLock.Wait(timeoutMs);
+                if (!locked) return false; // a write is in flight; don't risk interleaving frames
+                stream.Write(frame, 0, frame.Length);
+                stream.Flush();
+                return true;
+            }
+            catch
+            {
+                return false; // socket already gone; nothing to do
+            }
+            finally
+            {
+                if (locked) sendLock.Release();
+            }
+        }
+
         // Returns the next complete text message, or null when the connection closes. Handles
         // fragmentation, client masking, ping/pong, and close frames.
         public async Task<string> ReceiveMessageAsync(CancellationToken token)

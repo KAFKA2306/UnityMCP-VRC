@@ -47,6 +47,7 @@ process hosted its own server on a fixed port). The full rationale is in
 | Unity → client (resp)  | `{ "type": "commandResult", "id": "1", "data": { ... } }`           |
 | Unity → client (resp)  | `{ "type": "editorState", "id": "2", "data": { ... } }`             |
 | Unity → all (event)    | `{ "type": "log", "data": { message, stackTrace, logType, ts } }`   |
+| Unity → all (event)    | `{ "type": "reloading" }` — sent just before a domain-reload teardown |
 
 ## Transport: hand-rolled WebSocket
 
@@ -66,6 +67,10 @@ payloads (big commands, big state dumps) aren't truncated. It does **not** negot
 response, so frames stay uncompressed both ways.
 
 ## Threading model (Unity side)
+
+> The Editor states these mechanisms cope with — compiling, domain reload, play-mode,
+> focus/throttling — and when each happens are covered in
+> [004 — Unity Editor states](004-unity-editor-states.md).
 
 The accept loop and per-socket receive loops run on the **thread pool** (async), off
 Unity's editor loop. Anything that touches a Unity API must be marshalled to the main
@@ -88,10 +93,15 @@ a log broadcast, so each `ClientConnection` wraps its writes in a `SemaphoreSlim
   every domain reload; it starts the server via `EditorApplication.delayCall`.
 - **Teardown on reload.** A recompile (including edits made by `execute_editor_command`)
   ends in a domain reload that wipes all managed state — the listener, every client
-  socket, and the main-thread queue. `AssemblyReloadEvents.beforeAssemblyReload` calls
-  `StopServer` synchronously first: cancel the token, close all client sockets, stop the
-  listener. Clients see the close immediately and fail in-flight requests fast with a
-  retry hint instead of waiting out a timeout.
+  socket, and the main-thread queue. `AssemblyReloadEvents.beforeAssemblyReload` first
+  broadcasts a `reloading` notice to every client (a best-effort *blocking* send, since the
+  domain is unloading and async writes might not flush), then calls `StopServer`: cancel the
+  token, close all client sockets, stop the listener. A client that received the notice reports
+  its still-pending requests as *dropped before running — safe to retry* (they were only queued;
+  the loop defers while compiling, then the reload wipes the queue); a close **without** a
+  preceding notice is an arbitrary drop, reported as *may have applied — check state*. Either way
+  requests fail fast instead of waiting out a timeout; requests not yet sent wait for the
+  reconnect instead of failing.
 - **Reconnect.** The static constructor restarts the server in the new domain; the MCP
   client reconnects (~3s poll), so a recompile is a brief blip rather than a hang.
 - **Manual restart.** The Debug Window's *Restart Server* button calls `RetryConnection`
@@ -120,8 +130,7 @@ a log broadcast, so each `ClientConnection` wraps its writes in a `SemaphoreSlim
   dump can't blow up the context window.
 - **get_logs.** Served from the client-side buffer that the plugin's broadcast feeds.
 - **get_command_page.** Pulls later slices of a cached oversized command result by token +
-  offset. Reads only the in-memory cache (`requiresUnity: false`), so it works even while
-  Unity is disconnected.
+  offset. Reads only the in-memory cache, so it works even while Unity is disconnected.
 
 ## MCP server (client) internals
 
@@ -132,9 +141,14 @@ a log broadcast, so each `ClientConnection` wraps its writes in a `SemaphoreSlim
   tags the request with the next id, sends it, and resolves when the correlated response
   arrives (or rejects on timeout). On socket close it rejects all pending with a retry
   hint.
-- The tool dispatcher (`index.ts`) retries when Unity isn't connected (up to 5× / 5s)
-  before failing, so a tool call issued during a reconnect window can still succeed. Tools
-  can opt out of this gate with `requiresUnity: false` (used by `get_command_page`).
+- `sendRequest` waits (bounded, ~20s — `connectWaitMs`) for a live socket before sending, so a
+  call issued during a domain reload pauses for the reconnect instead of failing; past that it
+  fails with a hint that the Editor is down/busy. A request already in flight when the socket
+  dropped is **not** silently resent: if Unity sent the `reloading` notice first, the request was
+  only queued and never ran, so it's reported as *safe to retry*; otherwise it's an arbitrary drop
+  reported as *may have applied — check state*, since the command could be non-idempotent (see
+  [design decisions](002-design-decisions.md)). Cache/buffer-only tools (`get_command_page`,
+  `get_logs`) don't call `sendRequest`, so they work regardless of connection state.
 - **Resources:** files in `unity-mcp-server/src/resources/text/` are copied into the
   build and exposed as MCP resources (`file:///<name>`), read at server start.
 
@@ -173,7 +187,7 @@ a log broadcast, so each `ClientConnection` wraps its writes in a `SemaphoreSlim
 | Command response cap     | ~25,000 chars before paging (`MAX_RESPONSE_CHARS`); cache TTL 5 min, 20 entries |
 | Log buffer               | 1000 entries (plugin side), mirrored per-client             |
 | Reconnect poll           | ~3s (client)                                                 |
-| Disconnected-retry       | up to 5× / 5s (tool dispatcher)                              |
+| Connect-wait before send | up to ~20s, then fails with a hint (`connectWaitMs`, client) |
 
 ## Known limitations / possible next steps
 

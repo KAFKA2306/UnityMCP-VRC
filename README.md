@@ -20,7 +20,7 @@ most of it works for ordinary Unity development too.
 - **Bounded state.** `get_editor_state` returns scene/project state on demand, capped so
   a big project can't blow up the context window.
 - **Survives recompiles.** Domain reloads tear the link down cleanly and clients
-  auto-reconnect; in-flight requests fail fast with a retry hint instead of hanging.
+  auto-reconnect; requests sent during a reload wait for the link to return instead of failing.
 - **Live Debug Window.** Shows whether the server is actually listening, which clients
   are attached, last request, and the main-thread queue — so a broken link is obvious.
 - **VRChat helpers + MCP resources** to raise Claude's UdonSharp success rate.
@@ -89,6 +89,9 @@ More detail in [docs/001 — Architecture](docs/001-architecture.md#known-limita
 - [003 — Changes from the original fork](docs/003-changes-from-upstream.md) — how this
   repo diverges from upstream [Arodoid/UnityMCP](https://github.com/Arodoid/UnityMCP):
   the inverted topology, VRChat/UdonSharp support, paging, and the relicense.
+- [004 — Unity Editor states](docs/004-unity-editor-states.md) — the Editor lifecycle the
+  plugin survives: compiling, domain reload, play-mode, focus/throttling — when each happens
+  and what it means for a command in flight.
 
 ## License
 

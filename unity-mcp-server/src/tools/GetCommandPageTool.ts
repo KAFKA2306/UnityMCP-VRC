@@ -19,8 +19,6 @@ export class GetCommandPageTool implements Tool {
         "order, then parse the combined string as JSON.",
       category: "Editor Control",
       tags: ["unity", "editor", "command", "paging"],
-      // Reads only the in-memory cache, so it works even when Unity is disconnected.
-      requiresUnity: false,
       inputSchema: {
         type: "object",
         properties: {

@@ -138,7 +138,32 @@ namespace UnityMCP.Editor
         // constructor runs again in the new domain).
         private static void OnBeforeAssemblyReload()
         {
+            // Announce the reload BEFORE dropping sockets so clients can distinguish a clean reload
+            // (queued requests were dropped before they ran - safe to retry) from an arbitrary
+            // disconnect (an in-flight command may have applied). Best-effort and synchronous: the
+            // domain is unloading, so async sends might not flush.
+            NotifyClientsReloading();
             StopServer();
+        }
+
+        // Synchronously tell every connected client we're about to reload. A queued request can't
+        // have run yet (beforeAssemblyReload is on the main thread, so nothing is mid-execution),
+        // so anything still pending on a client when the socket then closes was dropped before
+        // running - the client uses this notice to say "safe to retry" instead of "may have applied".
+        private static void NotifyClientsReloading()
+        {
+            List<ClientConnection> snapshot;
+            lock (clients)
+            {
+                if (clients.Count == 0) return;
+                snapshot = new List<ClientConnection>(clients);
+            }
+
+            var message = JsonConvert.SerializeObject(new { type = "reloading" });
+            foreach (var c in snapshot)
+            {
+                try { c.TrySendTextBlocking(message); } catch { }
+            }
         }
 
         private static void StartServer()

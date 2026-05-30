@@ -22,12 +22,28 @@ export class UnityConnection {
   private readonly reconnectIntervalMs = 3000;
   private loggedConnectError = false;
 
+  // Set when Unity sends a "reloading" notice just before it drops the socket for a domain reload.
+  // Lets the close handler tell a clean reload (request was dropped before running - safe to retry)
+  // from an arbitrary disconnect (an in-flight command may have applied). Reset on each connect.
+  private reloadAnnounced = false;
+
   private logBuffer: LogEntry[] = [];
   private readonly maxLogBufferSize = 1000;
 
   // In-flight requests keyed by id, resolved when Unity sends the matching response.
   private pending = new Map<string, PendingRequest>();
   private nextId = 1;
+
+  // Callers parked in waitForConnection, released on the next "open". Lets a request issued during
+  // a domain reload pause for the reconnect instead of failing outright.
+  private connectionWaiters: Array<{
+    resolve: () => void;
+    reject: (reason: Error) => void;
+    timer: NodeJS.Timeout;
+  }> = [];
+  // How long sendRequest waits for a (re)connection before giving up. Covers a normal recompile/
+  // domain-reload bounce; beyond this we assume the Editor is down/busy and fail with a hint.
+  private readonly connectWaitMs = 20_000;
 
   constructor(port: number = 8080) {
     this.url = `ws://localhost:${port}`;
@@ -43,11 +59,14 @@ export class UnityConnection {
     ws.on("open", () => {
       this.connected = true;
       this.loggedConnectError = false;
+      this.reloadAnnounced = false;
       console.error(`[Unity MCP] Connected to Unity Editor at ${this.url}`);
       if (this.reconnectTimer) {
         clearTimeout(this.reconnectTimer);
         this.reconnectTimer = null;
       }
+      // Release anything that was waiting for the link to come back.
+      this.resolveConnectionWaiters();
     });
 
     ws.on("message", (data: Buffer) => {
@@ -76,13 +95,24 @@ export class UnityConnection {
       }
       this.connected = false;
       this.ws = null;
-      // Fail any in-flight requests fast with a retry hint instead of letting them hang.
-      this.rejectPending(
-        new Error(
-          "Unity disconnected (likely recompiling or reloading its app domain, or the " +
-            "Editor is not running). The connection re-establishes automatically - retry in a moment.",
-        ),
-      );
+
+      // Word the failure by whether Unity announced a reload just before closing.
+      // Announced: these requests were queued but dropped before running (the editor loop defers
+      // while compiling, then the reload wipes the queue), so they never applied - safe to retry.
+      // Not announced: an arbitrary drop where an in-flight command may have run, so the caller
+      // should check state first. (Never-sent requests wait out the reconnect in waitForConnection
+      // and never reach this path.)
+      const reason = this.reloadAnnounced
+        ? new Error(
+            "Unity is reloading its app domain (recompile); your request was dropped before it " +
+              "ran - safe to retry once it reconnects (which happens automatically).",
+          )
+        : new Error(
+            "Unity disconnected mid-request (it began recompiling or reloading its app domain). " +
+              "The command may or may not have applied - check the editor/scene state before retrying.",
+          );
+      this.reloadAnnounced = false;
+      this.rejectPending(reason);
       this.scheduleReconnect();
     });
   }
@@ -112,6 +142,12 @@ export class UnityConnection {
         this.handleLogMessage(data);
         break;
 
+      case "reloading":
+        // Unity is about to reload its app domain and will drop the socket next. Remember it so the
+        // "close" handler reports any still-pending requests as dropped-before-running / safe to retry.
+        this.reloadAnnounced = true;
+        break;
+
       case "commandResult":
       case "editorState":
         // Response arrived with no matching pending request (already timed out / cleared).
@@ -137,6 +173,43 @@ export class UnityConnection {
     this.pending.clear();
   }
 
+  // Resolve immediately if connected; otherwise wait for the next "open" up to timeoutMs, then
+  // reject with an actionable message. This lets a request ride out a domain-reload bounce instead
+  // of failing outright, while still giving up if the Editor is genuinely down.
+  private waitForConnection(timeoutMs: number): Promise<void> {
+    if (this.isConnected()) return Promise.resolve();
+    if (this.shuttingDown) {
+      return Promise.reject(new Error("MCP server shutting down."));
+    }
+    return new Promise<void>((resolve, reject) => {
+      const waiter = {
+        resolve,
+        reject,
+        timer: setTimeout(() => {
+          const i = this.connectionWaiters.indexOf(waiter);
+          if (i >= 0) this.connectionWaiters.splice(i, 1);
+          reject(
+            new Error(
+              `Unity is not connected after ${Math.round(timeoutMs / 1000)}s. The Editor isn't ` +
+                "running, or it has been compiling/reloading for a while - start or focus the " +
+                "Unity Editor and retry.",
+            ),
+          );
+        }, timeoutMs),
+      };
+      this.connectionWaiters.push(waiter);
+    });
+  }
+
+  private resolveConnectionWaiters(): void {
+    const waiters = this.connectionWaiters;
+    this.connectionWaiters = [];
+    for (const w of waiters) {
+      clearTimeout(w.timer);
+      w.resolve();
+    }
+  }
+
   // Public API
 
   public isConnected(): boolean {
@@ -150,19 +223,25 @@ export class UnityConnection {
   }
 
   // Send a request to Unity and resolve with the data from its correlated response.
-  public sendRequest(
+  public async sendRequest(
     type: string,
     data: any,
     timeoutMs: number = 60_000,
   ): Promise<any> {
+    // If Unity is mid-reload the socket is briefly gone; wait for it to come back (bounded) so a
+    // recompile is a pause, not a failure. The request hasn't been sent yet, so waiting then
+    // sending once is safe - unlike an in-flight drop, which the "close" handler surfaces instead
+    // of silently resending. Throws here if the Editor stays down past connectWaitMs.
+    await this.waitForConnection(this.connectWaitMs);
+
     return new Promise((resolve, reject) => {
       if (!this.isConnected()) {
-        // Usually a domain reload in progress (recompile) that just tore the socket down. Word it
-        // like the in-flight close below so callers - and the dispatcher's retry - treat it the same.
+        // Raced a drop between the wait resolving and here (rare). Still never sent, so it's safe
+        // to retry.
         reject(
           new Error(
-            "Unity is not connected (likely recompiling or reloading its app domain, or the " +
-              "Editor is not running). The connection re-establishes automatically - retry in a moment.",
+            "Unity is not connected (recompiling/reloading, or the Editor isn't running). " +
+              "Retry in a moment.",
           ),
         );
         return;
@@ -199,6 +278,11 @@ export class UnityConnection {
       this.reconnectTimer = null;
     }
     this.rejectPending(new Error("MCP server shutting down."));
+    for (const w of this.connectionWaiters) {
+      clearTimeout(w.timer);
+      w.reject(new Error("MCP server shutting down."));
+    }
+    this.connectionWaiters = [];
     if (this.ws) {
       try {
         this.ws.close();

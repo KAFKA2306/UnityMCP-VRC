@@ -13,18 +13,6 @@ import { UnityConnection } from "./communication/UnityConnection.js";
 import { getAllResources, ResourceContext } from "./resources/index.js";
 import { getAllTools, ToolContext } from "./tools/index.js";
 
-/**
- * True for errors that mean the Unity link dropped (typically a domain reload from a recompile),
- * as opposed to a genuine command failure or a request timeout. Used to decide whether a mid-call
- * failure is worth transparently retrying. Matches on message text because the error crosses the
- * WebSocket/tool boundary as a plain Error/McpError. Deliberately excludes "timed out" so a real
- * timeout isn't retried into a multi-minute hang.
- */
-function isConnectionLost(error: unknown): boolean {
-  const message = error instanceof Error ? error.message : String(error ?? "");
-  return /not connected|disconnected|recompil|reload/i.test(message);
-}
-
 class UnityMCPServer {
   private server: Server;
   private unityConnection: UnityConnection;
@@ -142,57 +130,17 @@ class UnityMCPServer {
         );
       }
 
-      // Tools that only read server-side state (e.g. get_command_page reads the cached
-      // command result) don't need Unity, so skip the connection gate for them.
-      const requiresUnity = tool.getDefinition().requiresUnity !== false;
+      // No connection gate here. Tools that talk to Unity go through UnityConnection.sendRequest,
+      // which waits (bounded) for a live socket before sending - so a request issued during a
+      // domain reload pauses for the reconnect instead of failing, and a genuinely-down Editor
+      // surfaces a clear message. Cache/buffer-only tools (get_command_page, get_logs) don't call
+      // sendRequest and so run regardless of connection state.
+      const toolContext: ToolContext = {
+        unityConnection: this.unityConnection,
+        logBuffer: this.unityConnection.getLogBuffer(),
+      };
 
-      // Try executing with retry logic for connection issues
-      let retryCount = 0;
-      const maxRetries = 5;
-      const retryDelay = 5000; // 5 seconds
-
-      while (true) {
-        // Verify Unity connection with detailed error message
-        if (requiresUnity && !this.unityConnection.isConnected()) {
-          if (retryCount < maxRetries) {
-            retryCount++;
-            console.error(`Unity Editor not connected (likely recompiling/reloading). Retrying in 5 seconds... (${retryCount}/${maxRetries})`);
-            await new Promise(resolve => setTimeout(resolve, retryDelay));
-            continue;
-          }
-          throw new McpError(
-            ErrorCode.InternalError,
-            "Unity Editor is not connected. Please ensure the Unity Editor is running and the UnityMCP window is open.",
-          );
-        }
-
-        // Create context object for tool execution
-        const toolContext: ToolContext = {
-          unityConnection: this.unityConnection,
-          logBuffer: this.unityConnection.getLogBuffer(),
-        };
-
-        // Execute the tool
-        try {
-          return await tool.execute(args, toolContext);
-        } catch (error) {
-          // A call can race a domain reload: the gate above saw a live socket, but Unity tore the
-          // connection down mid-flight (recompile/reload triggered by an earlier edit). Transparently
-          // retry the connection-loss case - same budget as the gate - so a reload is a brief blip
-          // rather than a surfaced error. Real command failures and timeouts propagate immediately.
-          if (
-            requiresUnity &&
-            retryCount < maxRetries &&
-            isConnectionLost(error)
-          ) {
-            retryCount++;
-            console.error(`Unity connection lost mid-call (likely recompiling/reloading). Retrying in 5 seconds... (${retryCount}/${maxRetries})`);
-            await new Promise(resolve => setTimeout(resolve, retryDelay));
-            continue;
-          }
-          throw error;
-        }
-      }
+      return await tool.execute(args, toolContext);
     });
   }
 

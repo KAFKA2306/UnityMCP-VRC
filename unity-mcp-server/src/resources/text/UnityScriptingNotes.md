@@ -1,7 +1,34 @@
 # Unity C# scripting notes (for execute_editor_command)
 
-Gotchas when writing C# that runs in the Editor via `execute_editor_command`. These bite
-silently — the code compiles and often *looks* like it worked.
+Gotchas when writing C# that runs in the Editor via `execute_editor_command` — what won't
+compile, and what compiles but bites silently (the code *looks* like it worked).
+
+## The executor compiles as C# 7.0
+
+Commands are compiled at language version **C# 7.0**, so newer syntax is a hard compile
+error. Most common one: the **bare `default` literal isn't allowed** — write the typed
+form `default(T)`:
+
+```csharp
+int n = default;            // ERROR (C# 7.1 feature)
+CancellationToken ct = default;
+int n = default(int);                       // OK
+CancellationToken ct = default(CancellationToken);   // OK
+```
+
+Other newer features that won't compile here — use the C# 7.0 equivalent instead:
+
+- **switch expressions** (`x switch { ... }`, C# 8) → use a classic `switch` statement.
+- **`using` declarations** (`using var x = ...;`, C# 8) → use a `using (...) { }` block.
+- **ranges/indices** (`arr[^1]`, `arr[1..3]`, C# 8) → index/`GetRange` explicitly.
+- **`??=`** (C# 8) → `if (x == null) x = ...;` (and mind the fake-null caveat below).
+- **target-typed `new()`** (C# 9) → name the type: `new Foo()`.
+
+`default(T)` aside, prefer plain, conservative C# and you'll stay inside 7.0. The
+compiler rejects newer syntax with a recognizable message — `CS1644: Feature '…' cannot
+be used because it is not part of the C# 7.0 language specification`, or a parse error
+like `CS1525: Unexpected symbol`. If you see either, downgrade the syntax rather than
+retrying the same code.
 
 ## Unity's "fake null" defeats `??`, `?.`, and `is null`
 
