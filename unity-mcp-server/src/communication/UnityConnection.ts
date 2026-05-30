@@ -157,7 +157,14 @@ export class UnityConnection {
   ): Promise<any> {
     return new Promise((resolve, reject) => {
       if (!this.isConnected()) {
-        reject(new Error("Unity Editor is not connected."));
+        // Usually a domain reload in progress (recompile) that just tore the socket down. Word it
+        // like the in-flight close below so callers - and the dispatcher's retry - treat it the same.
+        reject(
+          new Error(
+            "Unity is not connected (likely recompiling or reloading its app domain, or the " +
+              "Editor is not running). The connection re-establishes automatically - retry in a moment.",
+          ),
+        );
         return;
       }
 

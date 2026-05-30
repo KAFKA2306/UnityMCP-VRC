@@ -4,6 +4,8 @@ using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Threading.Tasks;
+using System.Reflection;
+using System.Runtime.ExceptionServices;
 using Newtonsoft.Json;
 using Microsoft.CSharp;
 using System.CodeDom.Compiler;
@@ -199,7 +201,20 @@ namespace UnityMCP.Editor
                 var assembly = results.CompiledAssembly;
                 var type = assembly.GetType("EditorCommand");
                 var method = type.GetMethod("Execute");
-                return method.Invoke(null, null);
+                try
+                {
+                    return method.Invoke(null, null);
+                }
+                catch (TargetInvocationException tie) when (tie.InnerException != null)
+                {
+                    // Reflection wraps whatever EditorCommand.Execute() throws in a
+                    // TargetInvocationException, whose message ("Exception has been thrown by the
+                    // target of an invocation") and stack trace are reflection plumbing, not the real
+                    // failure. Rethrow the inner exception - preserving its original stack - so callers
+                    // report the actual error (e.g. MissingComponentException) instead of the wrapper.
+                    ExceptionDispatchInfo.Capture(tie.InnerException).Throw();
+                    throw; // unreachable: Throw() above always rethrows; satisfies the compiler.
+                }
             }
         }
     }
