@@ -111,6 +111,9 @@ More detail in [docs/001 — Architecture](docs/001-architecture.md#known-limita
 - [005 — Executing LLM C#](docs/005-executing-csharp.md) — the command sandbox: how
   LLM-authored C# is compiled (auto-discovered references incl. the BCL facades) and run, result
   and log capture, output bounding, and the trust model.
+- [006 — Attaching UdonSharp components from code](docs/006-udonsharp-components.md) — the reliable
+  recipe for adding a *working* Udon script to a GameObject (program asset + backing UdonBehaviour +
+  proxy + `CopyProxyToUdon`), why each step is needed, and how `UdonSharpHelper` packages it in one call.
 
 ## License
 

@@ -170,6 +170,7 @@ namespace UnityMCP.Editor
                         name.StartsWith("Unity.") ||        // packages (TextMeshPro, Burst, ...)
                         name.StartsWith("VRC") ||           // VRCSDK3, VRCSDKBase, VRC.Udon, ...
                         name.StartsWith("UdonSharp") ||
+                        name.StartsWith("UnityMCP") ||      // the plugin's own helpers (UdonSharpHelper, ...)
                         name == "Assembly-CSharp" ||        // project runtime scripts
                         name == "Assembly-CSharp-Editor" || // project editor scripts (e.g. SsxLevelImporter)
                         // BCL facades. Because we compile with /nostdlib+, the compiler adds no

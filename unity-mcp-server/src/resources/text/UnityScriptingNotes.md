@@ -30,6 +30,32 @@ be used because it is not part of the C# 7.0 language specification`, or a parse
 like `CS1525: Unexpected symbol`. If you see either, downgrade the syntax rather than
 retrying the same code.
 
+### Local functions and statement-bodied lambdas don't parse
+
+The executor compiles with the **Mono `CSharpCodeProvider` (mcs)**, which — even though local
+functions are a C# 7.0 feature — does **not** accept them, and chokes on statement-bodied
+lambdas too. They surface as a cascade of nonsense parse errors (`CS1525`, `CS1519`,
+`Primary constructor body is not allowed`, `Identifier expected, '=>' is a keyword`) pointing
+at the function/lambda line. Hoist them to **static methods on the `EditorCommand` class**:
+
+```csharp
+// WRONG — local function; mcs reports a pile of CS15xx errors at this line
+Type Find(string n) { foreach (var a in ...) { ... } return null; }
+
+// WRONG — statement-bodied lambda inside LINQ
+asms.Select(a => { try { return a.GetType(n); } catch { return null; } })
+
+// CORRECT — a static helper method, called normally
+public class EditorCommand {
+    static Type Find(string n) { foreach (var a in AppDomain.CurrentDomain.GetAssemblies()) {
+        var t = a.GetType(n); if (t != null) return t; } return null; }
+    public static object Execute() { var t = Find("VRC.Udon.UdonBehaviour"); ... }
+}
+```
+
+Expression-bodied lambdas (`x => x.Name`, `(a,b) => a.CompareTo(b)`) are fine — it's only the
+`{ ... }`-bodied lambdas and local functions that fail.
+
 ## What's referenced (and the CS1070 trap)
 
 The full base class library is available — `System.Collections.Generic` (`List<T>`,
