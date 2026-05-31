@@ -33,11 +33,11 @@ building, while staying useful for ordinary Unity work.
 | Aspect            | Upstream (`91d84c1`)                          | This fork (current)                                            |
 | ----------------- | --------------------------------------------- | -------------------------------------------------------------- |
 | Who hosts         | MCP server hosts; Unity connects              | **Unity plugin hosts; MCP servers connect** (many sessions)    |
-| WebSocket         | `ws` library / platform                       | **Hand-rolled RFC 6455** over a raw `TcpListener` (Mono fix)   |
+| Transport         | `ws` WebSocket library                        | **Hand-rolled HTTP request/response** over a raw `TcpListener` (Mono fix) |
 | Editor state      | Continuous stream, output filters             | **On-demand, bounded** (caps on objects/nodes/depth)           |
 | `execute_…`       | C# snippet, fixed reference list              | **Full C# (classes/usings), auto-discovered references**       |
 | Large results     | Unbounded                                     | **Capped + paged** via `get_command_page`                      |
-| Recompiles        | Link could hang / go zombie                   | **Survives domain reloads**; in-flight requests fail fast      |
+| Recompiles        | Link could hang / go zombie                   | **Survives domain reloads** — no persistent socket; the next request retries |
 | Plugin code       | 2 files                                       | **Broken into focused files** (connection, executor, etc.)     |
 | MCP server code   | 1 monolithic `index.ts`                       | **Thin `index.ts` + one file per tool** + resources            |
 | Resources         | —                                             | **MCP text resources** (UdonSharp / VRChat notes)              |
@@ -46,22 +46,23 @@ building, while staying useful for ordinary Unity work.
 
 ## Changes by area
 
-### Connection model — inverted
-The biggest structural change. Unity now hosts a single server and any number of MCP
-clients (Claude sessions) attach to the same Editor, instead of each MCP-server process
-racing for the port and leaving "connected-but-dead" zombies. Requests carry an `id` that
-Unity echoes on the originating socket, enabling reply routing and concurrent in-flight
-requests. The WebSocket handshake/framing are hand-rolled over a raw `TcpListener` because
-Unity's Mono runtime doesn't reliably implement `HttpListener`'s WebSocket upgrade. Full
-rationale in [002 §"Unity hosts the server"](002-design-decisions.md).
+### Connection model — inverted, stateless
+The biggest structural change. Unity now hosts a single server and any number of MCP clients
+(Claude sessions) reach the same Editor, instead of each MCP-server process racing for the port and
+leaving "connected-but-dead" zombies. The transport is stateless HTTP request/response — one request
+per tool call, hand-rolled over a raw `TcpListener` because Unity's Mono doesn't reliably implement
+`HttpListener`. It started as a hand-rolled WebSocket; see [002 §"Historical: the WebSocket
+transport"](002-design-decisions.md#historical-the-websocket-transport-we-replaced) for why that's
+gone. Full rationale in
+[002 §"Unity hosts the server"](002-design-decisions.md#unity-hosts-the-server-one-request-per-call).
 
 ### Threading & lifecycle — survives recompiles
 - `EditorUtilities.RunOnMainThread` marshals Unity-API work onto a queue drained on
   `EditorApplication.update`, defers while compiling, and times out with an actionable
   message instead of hanging when the Editor is throttled (unfocused).
-- A domain reload (any recompile, including ones triggered by `execute_editor_command`)
-  tears the link down cleanly via `AssemblyReloadEvents.beforeAssemblyReload`; clients see
-  the close immediately and fail in-flight requests with a retry hint, then auto-reconnect.
+- A domain reload (any recompile, including ones triggered by `execute_editor_command`) just
+  stops the listener on `AssemblyReloadEvents.beforeAssemblyReload`; with no persistent connection
+  to drain, the next client request simply retries until the server restarts.
 
 ### `execute_editor_command` — real C#
 Authors full C# (its own `using`s, classes, functions), not just one-liners. Assembly
@@ -82,16 +83,14 @@ cache, rather than re-running the command (which could re-fire side effects). Se
 [002 §"Paging via a server-side snapshot"](002-design-decisions.md).
 
 ### `clear_logs` — new
-Empties the server-side log buffer (reporting how many entries it dropped) so a later
-`get_logs` isn't muddied by stale errors — e.g. a one-off failed compile. Buffer-only, like
-`get_command_page`, so it works regardless of connection state.
+Empties the plugin's log buffer (reporting how many entries it dropped) so a later `get_logs`
+isn't muddied by stale errors — e.g. a one-off failed compile.
 
 ### `take_screenshot` / `get_object_details` — new
-Ported from [setohima/UnityMCP-VRC] and adapted to this branch's inverted, id-correlated
-connection. The upstream port pushed unsolicited messages and parked a single global
-in-flight promise per result type, which can't serve the many concurrent Claude sessions
-this branch supports; here both tools ride the standard `sendRequest`/`SendResponse` path so
-each call is matched to its own response by id.
+Ported from [setohima/UnityMCP-VRC] and adapted to this fork's request/response transport. (The
+upstream port pushed unsolicited messages and parked a single global in-flight promise per result
+type, which couldn't serve multiple concurrent sessions; here each tool is a plain request that
+returns its own response.)
 - **`take_screenshot`** renders the Scene view (default) or the game camera to a JPEG/PNG
   image block, for visual iteration on edits.
 - **`get_object_details`** returns a GameObject's transform (incl. world-space `lossyScale`),
@@ -116,8 +115,8 @@ each call is matched to its own response by id.
   `resources/` loader. Upgraded the MCP SDK to 1.x.
 
 ### Tooling & diagnostics
-- Expanded **Debug Window**: server-listening state, attached clients, last request, and
-  main-thread queue depth, so a broken link is obvious.
+- Expanded **Debug Window**: server-listening state, last request, and main-thread queue depth,
+  so a broken link is obvious.
 - **Script Tester** window for manually running/diagnosing C# commands.
 - Stopped tracking Unity `.meta` files (Unity regenerates them on import).
 

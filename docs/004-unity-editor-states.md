@@ -12,10 +12,10 @@ Unity drives the Editor from a single main-thread tick, surfaced as `EditorAppli
 **Anything that touches the Unity API must run on that thread** — which is why the plugin marshals
 every command through `EditorUtilities.RunOnMainThread` and drains its queue on each tick.
 
-Background **threads and Tasks** (the WebSocket accept/receive loops, `Task.Delay` timers) run
+Background **threads and Tasks** (the HTTP accept loop and short-lived request handlers) run
 independently of that loop and keep going even when it doesn't tick. That split is the key to
-everything below: *the socket can be alive while the main thread is frozen, and the main thread
-can be ticking while the socket is gone.* The two failure modes are independent.
+everything below: *a request can be mid-flight while the main thread is frozen, and the main thread
+can be ticking while the listener is gone.* The two failure modes are independent.
 
 ## 1. Compiling — `EditorApplication.isCompiling == true`
 
@@ -58,9 +58,10 @@ The managed scripting **AppDomain is torn down and rebuilt** — the single most
   `ScriptableSingleton`, or an asset on disk. (This is why the paging cache lives in the MCP
   server process, not the plugin — see [002](002-design-decisions.md).)
 
-**Plugin behavior.** `beforeAssemblyReload` broadcasts the `reloading` notice, then `StopServer`
-drops the sockets. The `[InitializeOnLoad]` static constructor re-runs in the new domain and
-restarts the server; clients reconnect (~3s).
+**Plugin behavior.** `beforeAssemblyReload` just stops the listener (and closes any socket with a
+request in flight) — there's no persistent connection to drain. The `[InitializeOnLoad]` static
+constructor re-runs in the new domain and restarts the server; a client request that lands mid-reload
+is refused and retries until it's back.
 
 ## 3. Play Mode transitions
 
@@ -99,24 +100,25 @@ to a waiting command, and handled the same way (it waits, then fast-fails if the
 ```
 command writes a .cs file  ──►  (Editor refreshes: on focus / AssetDatabase.Refresh)
    └► isCompiling = true    ──►  background compile  ──►  success
-        └► beforeAssemblyReload   (plugin: broadcast "reloading", StopServer)
+        └► beforeAssemblyReload   (plugin: StopServer — stop the listener)
              └► domain UNLOAD     (statics wiped, sockets gone, Tasks abandoned)
                   └► domain LOAD  ──►  afterAssemblyReload, [InitializeOnLoad] re-runs
-                       └► server restarts  ──►  client reconnects (~3s)
+                       └► server restarts  ──►  next request reconnects
 ```
 
 The command that *wrote* the file usually finishes and returns **before** this chain starts; it's
-the **next** command that races the reconnect window — which is why that one is safe to wait out
-and resend, while a command interrupted mid-flight is not (see [002](002-design-decisions.md)).
+the **next** command that races the restart window — refused, then retried automatically. A command
+interrupted *mid-flight* (connection reset) is the ambiguous one: it may have applied, so it isn't
+auto-retried.
 
 ## Implications at a glance
 
-| State                         | Socket   | Main-thread loop | Command outcome                                            |
+| State                         | Listener | Main-thread loop | Command outcome                                            |
 | ----------------------------- | -------- | ---------------- | ---------------------------------------------------------- |
 | Idle / editing                | up       | ticking          | runs immediately                                           |
 | **Compiling**                 | up       | ticking          | **deferred** until the compile finishes                    |
-| **Domain reload**             | dropped  | torn down        | dropped; `reloading` notice → *safe to retry*; client waits for reconnect |
-| **Play-mode enter/exit** (default) | dropped | torn down   | same as a domain reload                                    |
+| **Domain reload**             | down     | torn down        | in-flight request dropped; the next request retries until the server restarts |
+| **Play-mode enter/exit** (default) | down | torn down   | same as a domain reload                                    |
 | **Unfocused / throttled**     | up       | frozen           | stalls → fast-fail ("unfocused or busy")                   |
 | **Busy** (modal / import)     | up       | blocked          | stalls → waits, then fast-fail if it persists              |
 

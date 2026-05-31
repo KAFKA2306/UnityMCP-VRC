@@ -4,216 +4,178 @@
 
 UnityMCP has two halves:
 
-- **Unity Editor plugin** (`UnityMCPPlugin/Editor`, C#) — hosts a WebSocket **server**
-  inside the running Editor and executes work against the Unity API.
-- **MCP server** (`unity-mcp-server`, Node/TypeScript) — a stdio MCP server that
-  connects to the plugin as a WebSocket **client** and exposes tools to Claude.
+- **Unity Editor plugin** (`UnityMCPPlugin/Editor`, C#) — hosts a small **HTTP server** inside the
+  running Editor and executes work against the Unity API.
+- **MCP server** (`unity-mcp-server`, Node/TypeScript) — a stdio MCP server that sends the plugin
+  one HTTP request per tool call and exposes the tools to Claude.
 
 ```
-  Claude session A ──┐   WebSocket clients
-  Claude session B ──┤   (each request tagged with an id)
+  Claude session A ──┐   one HTTP request per tool call
+  Claude session B ──┤   POST { type, data }  →  JSON result
   Claude session C ──┘
-          │  ws://localhost:8080
+          │  http://localhost:8080
           ▼
    ┌─────────────────────────────┐
    │  Unity Editor plugin        │   hosts the server · one Editor · many clients
    └─────────────────────────────┘
 ```
 
-The Unity-as-server topology is **inverted** from the original (where each MCP server
-process hosted its own server on a fixed port). The full rationale is in
-[design decisions](002-design-decisions.md); the short version is below.
+Unity hosting the server (rather than each MCP-server process hosting its own) lets many Claude
+sessions share one Editor with no port race. The transport is **stateless request/response**; it
+began as a persistent WebSocket — see the [historical
+note](002-design-decisions.md#historical-the-websocket-transport-we-replaced) for why that's gone.
 
 ## Connection model
 
-- **Unity hosts; clients connect.** A single `TcpListener` on port `8080` (dual-stack
-  IPv4/IPv6) accepts any number of clients. Because Unity owns the one port, multiple
-  Claude sessions can drive the same Editor at once — there is no port race and no
-  "connected-looking but dead" zombie server (the failure mode the inversion removed).
-- **Request ids / multiplexing.** Every request is `{ type, id, data }`. Unity echoes
-  the `id` on the response and replies on the **originating socket**, so each client
-  matches replies to its own calls and never sees another client's responses. This also
-  allows multiple concurrent in-flight requests per client.
-- **Logs are broadcast.** Unity pushes every console log to all connected clients as a
-  fire-and-forget event (no id). Each MCP server keeps its own log buffer, served by
-  `get_logs`.
+- **Unity hosts; clients send requests.** A single `TcpListener` on port `8080` (dual-stack
+  IPv4/IPv6) accepts connections; each carries **one** HTTP request and is then closed. Because Unity
+  owns the one port, any number of Claude sessions drive the same Editor — no race.
+- **Request/response.** A tool call is `POST /` with a JSON `{ type, data }` body; the plugin runs it
+  and returns the result as the JSON response body. No id-correlation, no persistent connection — the
+  response *is* the reply.
+- **Logs are pulled.** The plugin keeps a rolling console-log buffer; `get_logs` reads it on demand
+  and `clear_logs` empties it. Nothing is pushed from Unity.
 
 ### Wire protocol
 
-| Direction              | Message                                                              |
-| ---------------------- | ------------------------------------------------------------------- |
-| client → Unity (req)   | `{ "type": "executeEditorCommand", "id": "1", "data": { "code" } }` |
-| client → Unity (req)   | `{ "type": "getEditorState", "id": "2", "data": {} }`               |
-| Unity → client (resp)  | `{ "type": "commandResult", "id": "1", "data": { ... } }`           |
-| Unity → client (resp)  | `{ "type": "editorState", "id": "2", "data": { ... } }`             |
-| Unity → all (event)    | `{ "type": "log", "data": { message, stackTrace, logType, ts } }`   |
-| Unity → all (event)    | `{ "type": "reloading" }` — sent just before a domain-reload teardown |
+| Direction       | Message                                                                   |
+| --------------- | ------------------------------------------------------------------------- |
+| client → Unity  | `POST / {"type":"executeEditorCommand","data":{"code":"…"}}`              |
+| Unity → client  | `200 OK` + the result payload as the JSON body                            |
+| client → Unity  | `POST /` with type `getEditorState` · `takeScreenshot` · `getGameObjectDetails` · `getLogs` · `clearLogs` |
+| Unity → client  | `400`/`500` + `{ "error": … }` for an unknown type or a handler failure   |
+| any → Unity     | `GET` / `HEAD /` → `200 {"status":"ok","server":"UnityMCP"}` (liveness check); any other method → `405` |
 
-## Transport: hand-rolled WebSocket
+## Transport: hand-rolled HTTP
 
-The plugin implements the WebSocket upgrade handshake (SHA-1 of `Sec-WebSocket-Key` +
-the RFC 6455 magic GUID) and frame read/write over a raw `TcpListener`, rather than
-using `System.Net.HttpListener`.
-
-This is necessary, not a preference: **Unity's Mono runtime does not reliably implement
-`HttpListener`'s WebSocket upgrade** (`IsWebSocketRequest` / `AcceptWebSocketAsync`). It
-accepts the TCP/HTTP request but silently rejects the upgrade, so every client connect
-was being closed immediately. The raw socket sidesteps that entirely.
-
-The framing in `ClientConnection.cs` handles masking (clients mask, server frames are
-unmasked), fragmentation, ping/pong, close, and the 64-bit (`127`) length path so large
-payloads (big commands, big state dumps) aren't truncated. It does **not** negotiate
-`permessage-deflate` — the `ws` client offers it; the plugin omits it from the 101
-response, so frames stay uncompressed both ways.
+The plugin reads the request and writes the response by hand over a raw `TcpListener`, rather than
+using `System.Net.HttpListener`. This is necessary, not a preference: **Unity's Mono runtime doesn't
+reliably implement `HttpListener`** (it's also why the old WebSocket upgrade had to be hand-rolled).
+The implementation is deliberately tiny — read the request line + headers to the blank line, read
+`Content-Length` bytes of body, write a `Content-Length` response, close (`Connection: close`, one
+request per socket). No keep-alive, no chunked encoding.
 
 ## Threading model (Unity side)
 
 > The Editor states these mechanisms cope with — compiling, domain reload, play-mode,
-> focus/throttling — and when each happens are covered in
-> [004 — Unity Editor states](004-unity-editor-states.md).
+> focus/throttling — are covered in [004 — Unity Editor states](004-unity-editor-states.md).
 
-The accept loop and per-socket receive loops run on the **thread pool** (async), off
-Unity's editor loop. Anything that touches a Unity API must be marshalled to the main
-thread via `EditorUtilities.RunOnMainThread`, which:
+The accept loop and the short-lived per-request handlers run on the **thread pool** (async), off
+Unity's editor loop. Anything that touches a Unity API is marshalled to the main thread via
+`EditorUtilities.RunOnMainThread`, which:
 
 - enqueues the work and drains the queue on every `EditorApplication.update` tick;
-- **defers while Unity is compiling** (`EditorApplication.isCompiling`), so work runs
-  against stable post-compile state instead of racing a recompile;
-- has a generous timeout (`MainThreadTimeoutMs`, 55s) but fast-fails sooner when it can: the
-  Editor throttles (and on some platforms suspends) its loop while **unfocused**, so a
-  thread-pool watchdog notices the loop hasn't ticked for a few seconds and throws an actionable
-  message rather than waiting out the full timeout (focus the Editor, or set *Preferences >
-  General > Interaction Mode > No Throttling*).
+- **defers while Unity is compiling** (`EditorApplication.isCompiling`), so work runs against stable
+  post-compile state instead of racing a recompile;
+- has a generous timeout (`MainThreadTimeoutMs`, 55s) but fast-fails sooner when it can: a thread-pool
+  watchdog notices the loop hasn't ticked for a few seconds (the Editor throttles its loop while
+  **unfocused**) and throws an actionable message rather than waiting out the full timeout (focus the
+  Editor, or set *Preferences > General > Interaction Mode > No Throttling*).
 
-A WebSocket forbids overlapping `SendAsync` calls on one socket, and a response can race
-a log broadcast, so each `ClientConnection` wraps its writes in a `SemaphoreSlim(1,1)`.
+Because each connection handles a single request and is closed, there are no long-lived per-client
+receive loops or send locks to manage.
 
 ## Lifecycle & domain reload
 
-- **Start.** `[InitializeOnLoad]` runs the static constructor on editor load and after
-  every domain reload; it starts the server via `EditorApplication.delayCall`.
-- **Teardown on reload.** A recompile ends in a domain reload that wipes all managed state —
-  the listener, every client socket, and the main-thread queue. `beforeAssemblyReload` first
-  broadcasts a `reloading` notice (a best-effort *blocking* send, since async writes may not
-  flush as the domain unloads), then `StopServer` cancels the token and **closes every accepted
-  socket, including any still mid-handshake** — closing, not the token, is what unblocks a Mono
-  socket read, so an untracked mid-handshake socket would pin a thread and stall the reload (see
-  [design decisions](002-design-decisions.md)). Clients that got the notice report still-pending
-  requests as *safe to retry*; a close with no notice is reported as *may have applied — check
-  state*. Requests not yet sent wait out the reconnect instead (below).
-- **Reconnect.** The static constructor restarts the server in the new domain; the MCP
-  client reconnects (~3s poll), so a recompile is a brief blip rather than a hang.
-- **Manual restart.** The Debug Window's *Restart Server* button calls `RetryConnection`
-  (stop + start) — useful after freeing a port another process held.
+- **Start.** `[InitializeOnLoad]` runs the static constructor on editor load and after every domain
+  reload; it starts the server via `EditorApplication.delayCall`.
+- **Teardown on reload.** A recompile ends in a domain reload that wipes all managed state. On
+  `beforeAssemblyReload` the plugin just stops the listener (and closes any socket with a request in
+  flight). There's no persistent connection to drain — which is exactly why this is now a non-event
+  (see [002](002-design-decisions.md#historical-the-websocket-transport-we-replaced)).
+- **Reconnect.** The static constructor restarts the server in the new domain. A client request that
+  lands mid-reload gets connection-refused and **retries** (bounded, ~20s) until the server is back,
+  so a recompile is a brief pause, not a failure. A request that was already in flight when the socket
+  dropped is *not* retried — it may have applied, so the caller is told to check state.
+- **Manual restart.** The Debug Window's *Restart Server* button calls `RetryConnection` (stop +
+  start) — useful after freeing a port another process held.
 
 ## Tools
 
-| Tool                     | What it does                                                              |
+| Tool                     | What it does                                                             |
 | ------------------------ | ------------------------------------------------------------------------ |
 | `execute_editor_command` | Compiles and runs LLM-authored C# in the Editor; returns result + logs.  |
 | `get_editor_state`       | Returns Unity/scene/project state on demand (bounded).                   |
 | `get_object_details`     | Returns one GameObject's transform, components, and size/bounds info.    |
-| `get_logs`               | Returns recent Unity console logs from the server's buffer.              |
-| `clear_logs`             | Clears the server's buffered console logs.                               |
+| `get_logs`               | Returns recent Unity console logs from the plugin's buffer.              |
+| `clear_logs`             | Clears the plugin's buffered console logs.                               |
 | `take_screenshot`        | Renders the Scene or game camera to a JPEG/PNG image block.              |
-| `get_command_page`       | Fetches a later page of a large `execute_editor_command` result.         |
+| `get_command_page`       | Fetches a later page of a large result (used automatically).             |
 
-- **execute_editor_command.** The LLM authors full C# — its own `using`s, classes, and
-  functions — so commands aren't limited to one-liners. Assembly references are
-  auto-discovered from all loaded assemblies (UnityEngine modules and packages, VRChat /
-  UdonSharp, the .NET base class library — mscorlib, `System`, the `System.*` facades,
-  netstandard — `Assembly-CSharp(-Editor)`, and UnityMCP itself), so commands can use any
-  available API with no hand-maintained list. Stack traces are trimmed to the first line to
-  save context. Runs on the main thread with scoped log capture. The request timeout
-  defaults to 60s; pass `timeoutMs` (max 300s) for heavy ops. Results over ~25k chars are
-  **capped**: the full result is cached and returned page-by-page via `get_command_page`
-  (rationale in [design decisions](002-design-decisions.md)).
-- **get_editor_state.** On demand (not a continuous stream). **Capped** for large
-  scenes/projects — ≤300 listed objects/assets, ≤500 hierarchy nodes, depth ≤8 — so a
-  dump can't blow up the context window. An oversized result is also paged via
-  `get_command_page` as a byte-level backstop.
-- **get_object_details.** Resolves a GameObject by name or hierarchy path and reports its
-  transform (incl. world-space `lossyScale`), tag, layer, children, and per-component
-  fields/properties via reflection — plus extras the inspector can't easily give (Renderer
-  world-space bounds, mesh vertex counts, shared mesh/material names). Reflection skips
-  copy-instantiating accessors, caps collection previews, and expands user-defined types one
-  level (Unity types stay compact) to keep the payload bounded; an oversized result is paged
-  via `get_command_page`.
-- **take_screenshot.** Renders the Scene view (default) or the game camera into an offscreen
-  MSAA target and returns it as a base64 JPEG/PNG image block, for visual iteration. Runs on
-  the main thread; subject to the same unfocused-Editor throttling as other calls.
-- **get_logs.** Served from the server-side buffer that the plugin's broadcast feeds.
-- **clear_logs.** Empties that server-side buffer (reporting how many entries it dropped) so
-  a later `get_logs` isn't muddied by stale errors — e.g. a one-off failed compile. Doesn't
-  touch Unity, which keeps broadcasting, so the buffer refills from that point on.
-- **get_command_page.** Pulls later slices of any cached oversized tool result
-  (`execute_editor_command`, `get_object_details`, `get_editor_state`) by token + offset. Reads
-  only the in-memory cache, so it works even while Unity is disconnected.
+- **execute_editor_command.** The LLM authors full C# — its own `using`s, classes, and functions.
+  Assembly references are auto-discovered from all loaded assemblies (UnityEngine modules and
+  packages, VRChat/UdonSharp, the .NET base class library, `Assembly-CSharp(-Editor)`, and UnityMCP
+  itself), so commands can use any available API with no hand-maintained list. Runs on the main thread
+  with scoped log capture; stack traces are trimmed to the first line. Results over ~25k chars are
+  **capped** and paged via `get_command_page`. Full model: [005 — Executing LLM C#](005-executing-csharp.md).
+- **get_editor_state.** On demand (not a stream). **Capped** for large scenes/projects — ≤300 listed
+  objects/assets, ≤500 hierarchy nodes, depth ≤8. Oversized results are paged too.
+- **get_object_details.** Resolves a GameObject by name or hierarchy path and reports its transform
+  (incl. world-space `lossyScale`), tag, layer, children, and per-component fields/properties via
+  reflection — plus extras the inspector can't easily give (Renderer world-space bounds, mesh vertex
+  counts, shared mesh/material names). Caps collection previews and recursion depth; oversized results
+  are paged.
+- **take_screenshot.** Renders the Scene view (default) or the game camera to a base64 JPEG/PNG image
+  block. Runs on the main thread; subject to the same unfocused-Editor throttling as other calls.
+- **get_logs / clear_logs.** Read from / empty the plugin's rolling log buffer (~1000 entries).
+- **get_command_page.** Pulls later slices of a cached oversized result by token + offset. Reads only
+  the MCP server's in-memory cache, so it's the one tool that works even while Unity is unreachable.
 
 ## MCP server (client) internals
 
-- `communication/UnityConnection.ts` is a **reconnecting WebSocket client**: dials
-  `ws://localhost:8080`, reconnects every ~3s on drop (covers Unity not yet running and
-  domain reloads), and logs `ECONNREFUSED` only once to avoid noise.
-- It holds an **id-keyed pending-request map**; `sendRequest(type, data, timeoutMs)`
-  tags the request with the next id, sends it, and resolves when the correlated response
-  arrives (or rejects on timeout). On socket close it rejects all pending with a retry
-  hint.
-- `sendRequest` waits (bounded, ~20s — `connectWaitMs`) for a live socket before sending, so a
-  call issued during a reload pauses for the reconnect instead of failing; past that it fails with
-  a hint that the Editor is down/busy. A request already **in flight** when the socket drops is
-  never silently resent — it's surfaced as *safe to retry* or *may have applied* depending on
-  whether the `reloading` notice arrived first (see [design decisions](002-design-decisions.md)).
-  Cache/buffer-only tools (`get_command_page`, `get_logs`, `clear_logs`) don't call `sendRequest`,
-  so they work regardless of connection state.
-- **Resources:** files in `unity-mcp-server/src/resources/text/` are copied into the
-  build and exposed as MCP resources (`file:///<name>`), read at server start.
+- `communication/UnityConnection.ts` sends each tool call as an HTTP POST and returns the JSON
+  response. `sendRequest(type, data, timeoutMs)` aborts after `timeoutMs` and **retries a refused
+  connection** (bounded, ~20s — `connectWaitMs`), so a call issued during a domain reload pauses for
+  the bounce instead of failing. A connection *reset* mid-request is surfaced as *may have applied —
+  check state* rather than retried.
+- **Lifetime.** Nothing keeps the process alive but its stdio transport, so it exits when the client
+  (Claude) goes away — there's no background reconnect timer, hence no lingering "zombie" servers.
+- **Resources:** files in `unity-mcp-server/src/resources/text/` are copied into the build and exposed
+  as MCP resources (`file:///<name>`).
 
 ## Component / file map
 
 **Plugin (`UnityMCPPlugin/Editor`)**
 
-| File                      | Responsibility                                                        |
-| ------------------------- | --------------------------------------------------------------------- |
-| `UnityMCPConnection.cs`   | Server lifecycle (bind/accept/teardown), client list, dispatch, log broadcast, debug-window properties. |
-| `ClientConnection.cs`     | One client's WebSocket wire protocol (handshake + RFC 6455 framing) and per-socket send lock. |
-| `EditorCommandExecutor.cs`| Compile + run LLM C#, scoped log capture, result payload.             |
-| `EditorStateReporter.cs`  | Build the bounded editor-state payload.                               |
-| `EditorUtilities.cs`      | Main-thread queue / `RunOnMainThread`, compile-defer, throttle hint.  |
-| `UnityMCPWindow.cs`       | Debug Window diagnostics panel.                                       |
-| `ScriptTesterWindow.cs`   | Manual command runner for diagnosing C#.                              |
-| `UdonSharpHelper.cs`      | Generate UdonSharp assets from C# (VRChat).                           |
+| File                      | Responsibility                                                            |
+| ------------------------- | ------------------------------------------------------------------------- |
+| `UnityMCPConnection.cs`   | Server lifecycle (bind/accept/teardown), request dispatch, log buffer, debug-window properties. |
+| `ClientConnection.cs`     | One HTTP request/response exchange (read request, write response) over a raw socket. |
+| `EditorCommandExecutor.cs`| Compile + run LLM C#, scoped log capture, result payload.                |
+| `EditorStateReporter.cs`  | Build the bounded editor-state payload.                                  |
+| `InspectorDataReporter.cs`| Build a GameObject's component/inspection payload (bounded).             |
+| `ScreenshotCapturer.cs`   | Render the Scene/game camera to a base64 image.                          |
+| `EditorUtilities.cs`      | Main-thread queue / `RunOnMainThread`, compile-defer, throttle hint.     |
+| `UnityMCPWindow.cs`       | Debug Window diagnostics panel.                                          |
+| `ScriptTesterWindow.cs`   | Manual command runner for diagnosing C#.                                 |
+| `UdonSharpHelper.cs`      | Generate UdonSharp assets from C# (VRChat).                              |
 
 **MCP server (`unity-mcp-server/src`)**
 
-| Path                          | Responsibility                                          |
-| ----------------------------- | ------------------------------------------------------- |
-| `index.ts`                    | MCP wiring: list/call tools, list/read resources.       |
-| `communication/UnityConnection.ts` | Reconnecting WS client + id-keyed pending map.     |
-| `tools/*.ts`                  | One file per tool behind a common `Tool` interface.     |
-| `tools/commandResultCache.ts` | Shared cache + paging for oversized command results.    |
-| `resources/*.ts`              | Text-resource loading.                                  |
+| Path                          | Responsibility                                                       |
+| ----------------------------- | ------------------------------------------------------------------- |
+| `index.ts`                    | MCP wiring: list/call tools, list/read resources.                   |
+| `communication/UnityConnection.ts` | HTTP client: POST a request, return the JSON response, retry a refused connection. |
+| `tools/*.ts`                  | One file per tool behind a common `Tool` interface.                 |
+| `tools/commandResultCache.ts` | Shared cache + paging for oversized results.                        |
+| `resources/*.ts`              | Text-resource loading.                                              |
 
 ## Configuration & limits
 
-| Setting                  | Value / location                                              |
-| ------------------------ | ------------------------------------------------------------ |
-| Port                     | `8080` (`UnityMCPConnection.Port`, `new UnityConnection(8080)`) |
+| Setting                  | Value / location                                                            |
+| ------------------------ | --------------------------------------------------------------------------- |
+| Port                     | `8080` (`UnityMCPConnection.Port`, `new UnityConnection(8080)`)             |
 | Main-thread timeout      | `55s` (`EditorUtilities.MainThreadTimeoutMs`) — raise with the matching per-tool timeout if needed |
-| Editor-state caps        | ≤300 objects/assets, ≤500 hierarchy nodes, depth ≤8         |
-| Command response cap     | ~25,000 chars before paging (`MAX_RESPONSE_CHARS`); cache TTL 5 min, 20 entries |
-| Log buffer               | 1000 entries (plugin side), mirrored per-client             |
-| Reconnect poll           | ~3s (client)                                                 |
-| Connect-wait before send | up to ~20s, then fails with a hint (`connectWaitMs`, client) |
+| Editor-state caps        | ≤300 objects/assets, ≤500 hierarchy nodes, depth ≤8                        |
+| Result response cap      | ~25,000 chars before paging (`MAX_RESPONSE_CHARS`); cache TTL 5 min, 20 entries |
+| Log buffer               | ~1000 entries (plugin side)                                                |
+| Connect-retry window     | up to ~20s of retrying a refused connection, then fail with a hint (`connectWaitMs`, client) |
 
 ## Known limitations / possible next steps
 
-- Binds all interfaces (dual-stack), matching the old `ws` default — could restrict to
-  loopback if LAN exposure matters.
+- Binds all interfaces (dual-stack) — could restrict to loopback if LAN exposure matters. There's no
+  auth and `execute_editor_command` runs arbitrary C#, so don't expose the port to untrusted networks
+  (see [005 — trust model](005-executing-csharp.md#trust-model)).
 - Fixed port; no negotiation if `8080` is taken by something else.
-- The Debug Window lists each client's remote endpoint but not a human-friendly identity
-  (which Claude/project). Clients could send a `hello` with a label on connect.
-- No `permessage-deflate` (frames uncompressed both ways).
-- No server-initiated heartbeat — the server answers client pings but doesn't actively
-  ping. Low value over localhost; if added it must run off the editor loop, not on
-  `EditorApplication.update` (see [design decisions](002-design-decisions.md)).
+- Logs are pulled, not streamed — fine for how Claude uses them; a long-poll endpoint could add
+  near-real-time if ever needed.

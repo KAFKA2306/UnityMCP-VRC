@@ -127,13 +127,12 @@ class UnityMCPServer {
       }
 
       // No connection gate here. Tools that talk to Unity go through UnityConnection.sendRequest,
-      // which waits (bounded) for a live socket before sending - so a request issued during a
-      // domain reload pauses for the reconnect instead of failing, and a genuinely-down Editor
-      // surfaces a clear message. Cache/buffer-only tools (get_command_page, get_logs) don't call
-      // sendRequest and so run regardless of connection state.
+      // which retries (bounded) a refused connection before giving up - so a request issued during a
+      // domain reload pauses for the bounce instead of failing, and a genuinely-down Editor surfaces
+      // a clear message. get_command_page is the exception: it reads the in-memory page cache and
+      // never calls Unity, so it works regardless of connection state.
       const toolContext: ToolContext = {
         unityConnection: this.unityConnection,
-        logBuffer: this.unityConnection.getLogBuffer(),
       };
 
       return await tool.execute(args, toolContext);

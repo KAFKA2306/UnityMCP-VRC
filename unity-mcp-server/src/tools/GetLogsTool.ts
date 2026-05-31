@@ -5,7 +5,7 @@ export class GetLogsTool implements Tool {
     return {
       name: "get_logs",
       description:
-        "Retrieve recent Unity console logs (Log, Warning, Error, Exception) from this server's buffer, filtering by type, message or stack-trace substring, timestamp range, and which fields to return. The buffer is fed by Unity's log broadcast and holds roughly the last 1000 entries.",
+        "Retrieve recent Unity console logs (Log, Warning, Error, Exception) from the Unity Editor's log buffer, filtering by type, message or stack-trace substring, timestamp range, and which fields to return. The plugin keeps roughly the last 1000 entries.",
       category: "Debugging",
       tags: ["unity", "editor", "logs", "debugging", "console"],
       inputSchema: {
@@ -113,7 +113,9 @@ export class GetLogsTool implements Tool {
       timestampBefore: args?.timestampBefore as string | undefined,
     };
 
-    const logs = this.filterLogs(context.logBuffer, options);
+    const res = await context.unityConnection.sendRequest("getLogs", {});
+    const buffer = (res?.logs ?? []) as LogEntry[];
+    const logs = this.filterLogs(buffer, options);
     return {
       content: [
         {
@@ -146,20 +148,16 @@ export class GetLogsTool implements Tool {
       timestampBefore,
     } = options;
 
-    // First apply all filters
+    // Keep entries matching every supplied filter (type, message/stack substring, timestamp range).
     let filteredLogs = logBuffer.filter((log) => {
-      // Type filter
       if (types && !types.includes(log.logType)) return false;
 
-      // Message content filter
       if (messageContains && !log.message.includes(messageContains))
         return false;
 
-      // Stack trace content filter
       if (stackTraceContains && !log.stackTrace.includes(stackTraceContains))
         return false;
 
-      // Timestamp filters
       if (timestampAfter && new Date(log.timestamp) < new Date(timestampAfter))
         return false;
       if (
@@ -171,10 +169,9 @@ export class GetLogsTool implements Tool {
       return true;
     });
 
-    // Then apply count limit
+    // Keep the most-recent `count`, then project to the requested fields if any.
     filteredLogs = filteredLogs.slice(-count);
 
-    // Finally apply field selection if specified
     if (fields?.length) {
       return filteredLogs.map((log) => {
         const selectedFields: Partial<LogEntry> = {};

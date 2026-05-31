@@ -12,13 +12,13 @@ public class ScriptTester : EditorWindow
     private string scriptCode = "using UnityEngine;\nusing UnityEditor;\nusing System;\nusing System.Collections.Generic;\nusing System.Linq;\n\npublic class EditorCommand\n{\n    public static object Execute()\n    {\n        // Your code here\n        return \"Hello from Script Tester!\";\n    }\n}";
     private Vector2 codeScrollPosition;
     private Vector2 resultScrollPosition;
-    private Vector2 logsScrollPosition; // Scroll position for the logs section
-    private Vector2 mainScrollPosition; // Scroll position for the whole window
+    private Vector2 logsScrollPosition;
+    private Vector2 mainScrollPosition;
     private string resultText = "";
     private bool hasError = false;
     private List<string> logs = new List<string>();
-    private float codeEditorHeight = 400f; // Height of the code editor pane (drag-resizable via the splitter)
-    private bool isDraggingSplitter = false; // True while the user is dragging the splitter
+    private float codeEditorHeight = 400f; // drag-resizable via the splitter below the code pane
+    private bool isDraggingSplitter = false;
     
     [MenuItem("UnityMCP/Script Tester")]
     public static void ShowWindow()
@@ -149,7 +149,9 @@ public class ScriptTester : EditorWindow
         Repaint();
     }
     
-    // Process code string that might be from JSON with backticks
+    // Unescape a snippet pasted in its MCP wire form: a backtick-fenced JSON string literal (escaped
+    // newlines/quotes). Strips the fences, rejoins backslash-continued lines, then JSON-decodes back to
+    // raw C# source - so you can paste an execute_editor_command "code" argument verbatim and run it.
     private string ProcessJsonStringCode(string input)
     {
         if (string.IsNullOrEmpty(input))

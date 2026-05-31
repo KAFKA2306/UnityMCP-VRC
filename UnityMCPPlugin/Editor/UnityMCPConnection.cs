@@ -10,17 +10,19 @@ using Newtonsoft.Json;
 
 namespace UnityMCP.Editor
 {
-    // Unity HOSTS the WebSocket server; each MCP server process connects to it as a client.
+    // Unity HOSTS a tiny HTTP server; each MCP server process sends one request per tool call.
     //
-    // Previously this was reversed (Unity dialed out to a server each Claude session launched),
-    // which made the MCP servers fight over a fixed port 8080 - only the first bound it and the
-    // rest lingered as zombies that could never reach Unity. Inverting it lets any number of MCP
-    // servers connect to the one Editor at once. Each request carries an "id"; responses echo it
-    // back on the originating socket so a client matches a reply to its own in-flight call.
+    // The transport is stateless request/response (a POST with a JSON `{ type, data }` body returns
+    // the result as the JSON response, then the socket closes). It used to be a persistent WebSocket,
+    // but keeping a long-lived socket alive across Unity's frequent domain reloads is what generated
+    // almost all the connection-handling complexity - reconnect, ride-out, and a teardown that kept
+    // stalling the reload on a blocked socket thread. With request/response there's no idle socket to
+    // tear down: a reload is just "the next request retries". Unity still owns the one port, so any
+    // number of Claude sessions share one Editor with no port race.
     //
-    // This class owns the server lifecycle (bind/accept/teardown), the connected-client list,
-    // message dispatch, and log broadcast. The WebSocket wire protocol itself lives in
-    // ClientConnection (handshake + RFC 6455 framing).
+    // This class owns the server lifecycle (bind/accept/teardown), request dispatch, and the log
+    // buffer that get_logs reads. The HTTP wire handling (read request, write response) lives in
+    // ClientConnection. HTTP is hand-rolled over TcpListener because Mono's HttpListener is unreliable.
     [InitializeOnLoad]
     public class UnityMCPConnection
     {
@@ -28,21 +30,13 @@ namespace UnityMCP.Editor
 
         private static TcpListener listener;
         private static bool isListening;
-
-        // Set at the very start of a domain-reload teardown. While true, log broadcasts skip sending
-        // so we don't pile async writes onto sockets we're closing (a wedged one would otherwise keep
-        // a thread in a native send and hold up the domain unload). Reset when the server (re)starts.
-        private static volatile bool tearingDown;
         private static CancellationTokenSource serverCts;
-        private static readonly List<ClientConnection> clients = new List<ClientConnection>();
 
-        // Every accepted TCP socket, tracked from accept until HandleClient finishes - including the
-        // mid-handshake window before it's promoted to a ClientConnection (and added to `clients`).
-        // Teardown must close these directly: a socket read blocked in the handshake does NOT observe
-        // the cancellation token on Mono, so closing the socket is the only thing that unblocks it. An
-        // untracked mid-handshake socket was pinning a thread-pool thread in a native read and stalling
-        // domain reload for ~17s+ (the old domain can't unload while a thread sits in that read).
-        private static readonly HashSet<TcpClient> acceptedSockets = new HashSet<TcpClient>();
+        // Sockets with a request in flight, tracked from accept until the handler finishes. Teardown
+        // closes them directly: on Mono, closing the socket is what unblocks a thread parked in a
+        // socket read (the cancellation token doesn't reach it). Each request is short-lived, so this
+        // set is usually empty - it only matters for the rare reload-mid-request.
+        private static readonly HashSet<TcpClient> activeSockets = new HashSet<TcpClient>();
 
         private static string lastErrorMessage = "";
         private static readonly Queue<LogEntry> logBuffer = new Queue<LogEntry>();
@@ -56,14 +50,11 @@ namespace UnityMCP.Editor
         private static DateTime lastRequestUtc;
         private static int totalRequests;
 
-        // Public properties for the debug window.
-        // IsListening is the authoritative signal: the server owns the port and is accepting
-        // connections. False means the bind failed (e.g. another process holds the port) - see
-        // LastErrorMessage. IsConnected/ConnectedClientCount report how many clients are attached.
+        // Public properties for the debug window. IsListening is the authoritative signal: the server
+        // owns the port and is accepting requests. False means the bind failed (e.g. another process
+        // holds the port) - see LastErrorMessage.
         public static bool IsListening => isListening;
-        public static bool IsConnected { get { lock (clients) { return clients.Count > 0; } } }
-        public static int ConnectedClientCount { get { lock (clients) { return clients.Count; } } }
-        public static Uri ServerUri => new Uri($"ws://localhost:{Port}/");
+        public static Uri ServerUri => new Uri($"http://localhost:{Port}/");
         public static string LastErrorMessage => lastErrorMessage;
         public static DateTime ServerStartedUtc => serverStartedUtc;
         public static string LastRequestType => lastRequestType;
@@ -71,30 +62,6 @@ namespace UnityMCP.Editor
         public static int TotalRequestCount => totalRequests;
         public static int BufferedLogCount { get { lock (logBuffer) { return logBuffer.Count; } } }
 
-        // Snapshot of currently connected clients, for the debug window.
-        public readonly struct ClientInfo
-        {
-            public readonly string Endpoint;
-            public readonly DateTime ConnectedAtUtc;
-            public ClientInfo(string endpoint, DateTime connectedAtUtc)
-            {
-                Endpoint = endpoint;
-                ConnectedAtUtc = connectedAtUtc;
-            }
-        }
-
-        public static ClientInfo[] GetConnectedClients()
-        {
-            lock (clients)
-            {
-                var arr = new ClientInfo[clients.Count];
-                for (int i = 0; i < clients.Count; i++)
-                {
-                    arr[i] = new ClientInfo(clients[i].RemoteEndPoint, clients[i].ConnectedAtUtc);
-                }
-                return arr;
-            }
-        }
         public static bool IsLoggingEnabled
         {
             get => isLoggingEnabled;
@@ -137,62 +104,25 @@ namespace UnityMCP.Editor
             Debug.Log("[UnityMCP] Plugin initialized");
             EditorApplication.delayCall += () =>
             {
-                Debug.Log("[UnityMCP] Starting MCP WebSocket server");
+                Debug.Log("[UnityMCP] Starting MCP server");
                 StartServer();
             };
             AssemblyReloadEvents.beforeAssemblyReload += OnBeforeAssemblyReload;
         }
 
-        // A domain reload (recompiles, including execute_editor_command edits) wipes all managed
-        // state here - the listener, every client socket, and EditorUtilities' main-thread queue.
-        // Tear the server down synchronously now so connected MCP clients see the close
-        // immediately, fail their in-flight requests with a "retry" instead of waiting out a
-        // timeout, and reconnect once the server restarts after the reload (this static
-        // constructor runs again in the new domain).
+        // A domain reload wipes all managed state (the listener, any in-flight socket, the
+        // main-thread queue). With stateless request/response there's no persistent connection to
+        // drain - just stop accepting and close any in-flight socket so its handler unwinds. The
+        // [InitializeOnLoad] static constructor restarts the server in the new domain, and each
+        // client's next request reconnects.
         private static void OnBeforeAssemblyReload()
         {
-            // Stop background log broadcasts first so the disconnect logs we're about to generate
-            // don't kick off fresh async sends to sockets that are closing.
-            tearingDown = true;
-            // Announce the reload BEFORE dropping sockets so clients can distinguish a clean reload
-            // (queued requests were dropped before they ran - safe to retry) from an arbitrary
-            // disconnect (an in-flight command may have applied). Best-effort and synchronous: the
-            // domain is unloading, so async sends might not flush.
-            NotifyClientsReloading();
             StopServer();
-        }
-
-        // Synchronously tell every connected client we're about to reload. A queued request can't
-        // have run yet (beforeAssemblyReload is on the main thread, so nothing is mid-execution),
-        // so anything still pending on a client when the socket then closes was dropped before
-        // running - the client uses this notice to say "safe to retry" instead of "may have applied".
-        private static void NotifyClientsReloading()
-        {
-            List<ClientConnection> snapshot;
-            lock (clients)
-            {
-                if (clients.Count == 0) return;
-                snapshot = new List<ClientConnection>(clients);
-            }
-
-            // Best-effort and strictly time-boxed: this runs on the main thread while the domain is
-            // unloading, so the whole notify must stay snappy no matter how many clients are
-            // attached. Each send is individually bounded (see TrySendTextBlocking); this also caps
-            // the total, so a roomful of wedged clients can't add up to a long main-thread stall.
-            var message = JsonConvert.SerializeObject(new { type = "reloading" });
-            var deadlineUtc = DateTime.UtcNow.AddMilliseconds(1000);
-            foreach (var c in snapshot)
-            {
-                int remainingMs = (int)(deadlineUtc - DateTime.UtcNow).TotalMilliseconds;
-                if (remainingMs <= 0) break; // out of budget - skip the rest; StopServer still closes them
-                try { c.TrySendTextBlocking(message, Math.Min(200, remainingMs)); } catch { }
-            }
         }
 
         private static void StartServer()
         {
             if (isListening) return;
-            tearingDown = false;
 
             try
             {
@@ -205,7 +135,7 @@ namespace UnityMCP.Editor
                 isListening = true;
                 serverStartedUtc = DateTime.UtcNow;
                 lastErrorMessage = "";
-                Debug.Log($"[UnityMCP] WebSocket server listening on ws://localhost:{Port}/");
+                Debug.Log($"[UnityMCP] HTTP server listening on http://localhost:{Port}/");
                 _ = AcceptLoop(serverCts.Token);
             }
             catch (Exception e)
@@ -222,26 +152,15 @@ namespace UnityMCP.Editor
             isListening = false;
             try { serverCts?.Cancel(); } catch { }
 
-            // Close outstanding client sockets so their receive loops unwind promptly.
-            lock (clients)
+            // Close any socket with a request in flight so its handler unwinds promptly. Closing is
+            // the real unblock on Mono; the cancel token above is only a best-effort nudge.
+            lock (activeSockets)
             {
-                foreach (var c in clients)
-                {
-                    try { c.Close(); } catch { }
-                }
-                clients.Clear();
-            }
-
-            // Close EVERY accepted socket, including any still mid-handshake (not yet in `clients`).
-            // This is the one that prevented the reload stall: a blocked handshake read only unblocks
-            // when its socket is closed (the cancel token above doesn't reach a Mono socket read).
-            lock (acceptedSockets)
-            {
-                foreach (var s in acceptedSockets)
+                foreach (var s in activeSockets)
                 {
                     try { s.Close(); } catch { }
                 }
-                acceptedSockets.Clear();
+                activeSockets.Clear();
             }
 
             try { listener?.Stop(); } catch { }
@@ -268,87 +187,85 @@ namespace UnityMCP.Editor
                     break;
                 }
 
-                _ = HandleClient(tcp, token);
+                _ = HandleRequest(tcp, token);
             }
         }
 
-        private static async Task HandleClient(TcpClient tcp, CancellationToken token)
+        // Serves one request: read the HTTP body, dispatch it, write the JSON response, close.
+        private static async Task HandleRequest(TcpClient tcp, CancellationToken token)
         {
-            // Track the raw socket immediately - BEFORE the handshake read - so teardown can always
-            // close it (closing is what unblocks a Mono socket read; the token won't).
-            lock (acceptedSockets) acceptedSockets.Add(tcp);
+            lock (activeSockets) activeSockets.Add(tcp);
 
-            ClientConnection client = null;
+            ClientConnection conn = null;
             try
             {
-                // If we're already tearing down, don't even start a handshake read - it could block on
-                // a socket the StopServer close-loop has already passed, pinning a thread through the
-                // reload. (Closing here is safe whether or not StopServer also closes it.)
                 if (token.IsCancellationRequested || !isListening)
                 {
                     try { tcp.Close(); } catch { }
                     return;
                 }
 
-                client = await ClientConnection.AcceptAsync(tcp, token).ConfigureAwait(false);
-                if (client == null)
-                {
-                    Debug.LogWarning("[UnityMCP] WebSocket handshake failed (not a valid upgrade request)");
-                    return;
-                }
+                conn = ClientConnection.Create(tcp);
+                var request = await conn.ReadRequestAsync(token).ConfigureAwait(false);
+                if (request == null) return; // closed / malformed
 
-                lock (clients) clients.Add(client);
-                Debug.Log($"[UnityMCP] MCP client connected ({ConnectedClientCount} total)");
-
-                while (!token.IsCancellationRequested)
-                {
-                    string message;
-                    try
-                    {
-                        message = await client.ReceiveMessageAsync(token).ConfigureAwait(false);
-                    }
-                    catch (Exception)
-                    {
-                        break; // connection dropped
-                    }
-
-                    if (message == null) break; // closed
-                    await HandleMessage(client, message, token).ConfigureAwait(false);
-                }
+                var (status, statusText, json) =
+                    await Dispatch(request.Value.method, request.Value.body, token).ConfigureAwait(false);
+                // HEAD gets the same status and headers as GET but no body, per HTTP.
+                bool includeBody = request.Value.method != "HEAD";
+                await conn.WriteJsonResponseAsync(status, statusText, json, includeBody, token).ConfigureAwait(false);
             }
             catch (Exception e)
             {
-                // While tearing down (isListening == false) the read throwing on a closed socket is
-                // expected - don't surface it as an error.
-                if (isListening) Debug.LogError($"[UnityMCP] Client error: {e.Message}");
+                // While tearing down (isListening == false) a read/write throwing on a closed socket
+                // is expected - don't surface it as an error.
+                if (isListening) Debug.LogError($"[UnityMCP] Request error: {e.Message}");
             }
             finally
             {
-                lock (acceptedSockets) acceptedSockets.Remove(tcp);
-                if (client != null)
-                {
-                    lock (clients) clients.Remove(client);
-                    client.Close();
-                    Debug.Log($"[UnityMCP] MCP client disconnected ({ConnectedClientCount} remaining)");
-                }
-                else
-                {
-                    try { tcp.Close(); } catch { }
-                }
+                lock (activeSockets) activeSockets.Remove(tcp);
+                if (conn != null) conn.Close();
+                else { try { tcp.Close(); } catch { } }
             }
         }
 
-        private static async Task HandleMessage(ClientConnection client, string message, CancellationToken token)
+        // Routes a request body ({ type, data }) to the right handler and returns the HTTP status and
+        // the JSON response payload. The payload IS the response body - there's no envelope or id,
+        // since request/response is inherently correlated.
+        private static async Task<(int status, string statusText, string json)> Dispatch(string method, string body, CancellationToken token)
         {
-            string id = null;
+            // Non-POST methods aren't commands. GET/HEAD answer a liveness probe (a browser opening
+            // the URL, or a health check); anything else is rejected with 405.
+            if (method != "POST")
+            {
+                if (method == "GET" || method == "HEAD")
+                    return (200, "OK", JsonConvert.SerializeObject(new { status = "ok", server = "UnityMCP" }));
+                return (405, "Method Not Allowed", JsonConvert.SerializeObject(new
+                {
+                    error = $"{method} not supported - POST a JSON {{ type, data }} command, or GET for a health check."
+                }));
+            }
+
+            // A POST that carried no body (or omitted Content-Length) can't hold a command. Say so
+            // plainly instead of falling through to a misleading "unknown request type".
+            if (string.IsNullOrEmpty(body))
+            {
+                return (400, "Bad Request", JsonConvert.SerializeObject(new
+                {
+                    error = "Empty request body - POST a JSON { type, data } command with a Content-Length header."
+                }));
+            }
+
             string type = null;
             try
             {
-                var data = JsonConvert.DeserializeObject<Dictionary<string, object>>(message);
-                type = data.ContainsKey("type") ? data["type"]?.ToString() : null;
-                id = data.ContainsKey("id") ? data["id"]?.ToString() : null;
-                var payload = data.ContainsKey("data") && data["data"] != null ? data["data"].ToString() : "{}";
+                var msg = JsonConvert.DeserializeObject<Dictionary<string, object>>(body);
+                type = msg != null && msg.ContainsKey("type") ? msg["type"]?.ToString() : null;
+                string dataJson = msg != null && msg.ContainsKey("data") && msg["data"] != null
+                    ? msg["data"].ToString()
+                    : "{}";
 
+                // Count only the "real work" calls in the debug-window telemetry, not log fetches.
                 if (type == "executeEditorCommand" || type == "getEditorState" ||
                     type == "takeScreenshot" || type == "getGameObjectDetails")
                 {
@@ -357,20 +274,19 @@ namespace UnityMCP.Editor
                     Interlocked.Increment(ref totalRequests);
                 }
 
+                object payload;
                 switch (type)
                 {
                     case "executeEditorCommand":
-                    {
-                        object resultData;
                         try
                         {
-                            resultData = await EditorCommandExecutor.ExecuteAndGetResult(payload).ConfigureAwait(false);
+                            payload = await EditorCommandExecutor.ExecuteAndGetResult(dataJson).ConfigureAwait(false);
                         }
                         catch (Exception e)
                         {
-                            // e.g. RunOnMainThread timed out (Editor unfocused). Return a failed
-                            // result so the client reports it instead of waiting out its timeout.
-                            resultData = new
+                            // e.g. RunOnMainThread timed out (Editor unfocused). Return a failed result
+                            // so the client reports it instead of waiting out its own timeout.
+                            payload = new
                             {
                                 result = (object)null,
                                 logs = new List<string>(),
@@ -380,42 +296,66 @@ namespace UnityMCP.Editor
                                 errorDetails = new { message = e.Message, stackTrace = "", type = e.GetType().Name }
                             };
                         }
-                        await SendResponse(client, "commandResult", id, resultData, token).ConfigureAwait(false);
                         break;
-                    }
                     case "getEditorState":
-                    {
-                        var stateData = await editorStateReporter.GetEditorStateData().ConfigureAwait(false);
-                        await SendResponse(client, "editorState", id, stateData, token).ConfigureAwait(false);
+                        payload = await editorStateReporter.GetEditorStateData().ConfigureAwait(false);
                         break;
-                    }
                     case "takeScreenshot":
-                    {
-                        var shotData = await new ScreenshotCapturer().GetScreenshotData(payload).ConfigureAwait(false);
-                        await SendResponse(client, "screenshot", id, shotData, token).ConfigureAwait(false);
+                        payload = await new ScreenshotCapturer().GetScreenshotData(dataJson).ConfigureAwait(false);
                         break;
-                    }
                     case "getGameObjectDetails":
-                    {
-                        var detailsData = await new InspectorDataReporter().GetObjectDetailsData(payload).ConfigureAwait(false);
-                        await SendResponse(client, "objectDetails", id, detailsData, token).ConfigureAwait(false);
+                        payload = await new InspectorDataReporter().GetObjectDetailsData(dataJson).ConfigureAwait(false);
                         break;
-                    }
+                    case "getLogs":
+                        payload = GetLogPayload();
+                        break;
+                    case "clearLogs":
+                        payload = ClearLogPayload();
+                        break;
                     default:
-                        Debug.LogWarning($"[UnityMCP] Unknown message type: {type}");
-                        break;
+                        return (400, "Bad Request",
+                            JsonConvert.SerializeObject(new { error = $"Unknown request type: {type}" }));
                 }
+
+                return (200, "OK", JsonConvert.SerializeObject(payload));
             }
             catch (Exception e)
             {
-                Debug.LogError($"[UnityMCP] Error handling message: {e.Message}");
+                Debug.LogError($"[UnityMCP] Error handling request '{type}': {e.Message}");
+                return (500, "Internal Server Error", JsonConvert.SerializeObject(new { error = e.Message }));
             }
         }
 
-        private static Task SendResponse(ClientConnection client, string type, string id, object data, CancellationToken token)
+        // Snapshot of the buffered console logs, for get_logs (the client filters/slices).
+        private static object GetLogPayload()
         {
-            var message = JsonConvert.SerializeObject(new { type, id, data });
-            return client.SendTextAsync(message, token);
+            lock (logBuffer)
+            {
+                var list = new List<object>(logBuffer.Count);
+                foreach (var e in logBuffer)
+                {
+                    list.Add(new
+                    {
+                        message = e.Message,
+                        stackTrace = e.StackTrace,
+                        logType = e.Type.ToString(),
+                        timestamp = e.Timestamp.ToString("o")
+                    });
+                }
+                return new { logs = list };
+            }
+        }
+
+        // Empties the log buffer and reports how many entries were dropped, for clear_logs.
+        private static object ClearLogPayload()
+        {
+            int cleared;
+            lock (logBuffer)
+            {
+                cleared = logBuffer.Count;
+                logBuffer.Clear();
+            }
+            return new { cleared };
         }
 
         private static void HandleLogMessage(string message, string stackTrace, LogType type)
@@ -437,50 +377,6 @@ namespace UnityMCP.Editor
                 {
                     logBuffer.Dequeue();
                 }
-            }
-
-            BroadcastLog(logEntry);
-        }
-
-        // Push a log line to every connected client (each MCP server keeps its own buffer).
-        private static void BroadcastLog(LogEntry logEntry)
-        {
-            if (tearingDown) return; // mid-reload: don't start sends to sockets we're closing
-
-            List<ClientConnection> snapshot;
-            lock (clients)
-            {
-                if (clients.Count == 0) return;
-                snapshot = new List<ClientConnection>(clients);
-            }
-
-            var message = JsonConvert.SerializeObject(new
-            {
-                type = "log",
-                data = new
-                {
-                    message = logEntry.Message,
-                    stackTrace = logEntry.StackTrace,
-                    logType = logEntry.Type.ToString(),
-                    timestamp = logEntry.Timestamp
-                }
-            });
-
-            foreach (var client in snapshot)
-            {
-                _ = SafeSend(client, message);
-            }
-        }
-
-        private static async Task SafeSend(ClientConnection client, string message)
-        {
-            try
-            {
-                await client.SendTextAsync(message, serverCts?.Token ?? CancellationToken.None).ConfigureAwait(false);
-            }
-            catch (Exception)
-            {
-                // Client is likely gone; its receive loop will remove it.
             }
         }
     }

@@ -16,12 +16,10 @@
     "inspector": "npx @modelcontextprotocol/inspector build/index.js"
   },
   "dependencies": {
-    "@modelcontextprotocol/sdk": "^1.29.0",
-    "ws": "^8.21.0"
+    "@modelcontextprotocol/sdk": "^1.29.0"
   },
   "devDependencies": {
     "@types/node": "^24",
-    "@types/ws": "^8.18.1",
     "typescript": "^6.0.3"
   }
 }

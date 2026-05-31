@@ -140,29 +140,22 @@ public class EditorCommand
     );
 
     try {
-      // Mark the current end of the log buffer (and start the clock) so we can later slice out
-      // just the logs and timing for this one command.
-      const startLogIndex = context.logBuffer.length;
       const commandStartTime = Date.now();
 
-      // Send command to Unity and await its correlated response (matched by request id).
+      // Send the command to Unity and await its result. The payload already carries this command's
+      // own scoped logs/errors/warnings (captured plugin-side around the snippet), so there's no
+      // separate log buffer to slice here.
       const result = await context.unityConnection.sendRequest(
         "executeEditorCommand",
         { code: args.code },
         timeoutMs,
       );
 
-      // Get logs that occurred during command execution
-      const commandLogs = context.logBuffer
-        .slice(startLogIndex)
-        .filter((log) => log.message.includes("[UnityMCP]"));
-
       const executionTime = Date.now() - commandStartTime;
 
       const text = JSON.stringify(
         {
           result,
-          logs: commandLogs,
           executionTime: `${executionTime}ms`,
           status: "success",
         },

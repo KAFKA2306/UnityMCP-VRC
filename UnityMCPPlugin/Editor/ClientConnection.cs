@@ -1,35 +1,29 @@
 using System;
 using System.Collections.Generic;
 using System.Net.Sockets;
-using System.Security.Cryptography;
 using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
 
 namespace UnityMCP.Editor
 {
-    // One connected MCP client, wrapping its TCP socket with a hand-rolled WebSocket
-    // implementation (RFC 6455). Unity's Mono runtime does not reliably support HttpListener's
-    // WebSocket upgrade, so the handshake and framing are done by hand over a raw socket here.
+    // One HTTP request/response exchange over a raw TCP socket.
     //
-    // This type owns the WebSocket wire protocol end-to-end - AcceptAsync performs the upgrade
-    // handshake, ReceiveMessageAsync/SendTextAsync move text messages, and all the framing
-    // (masking, fragmentation, ping/pong, close) stays internal. UnityMCPConnection deals only in
-    // whole string messages and never touches frames.
+    // The plugin serves a tiny HTTP/1.1 endpoint (one request per connection, Connection: close)
+    // rather than a persistent WebSocket: a tool call is a POST with a JSON body, the result is the
+    // JSON response, then the socket closes. Stateless request/response means a domain reload is just
+    // "the next request retries" - there's no long-lived socket (and no idle blocked receive thread)
+    // to tear down, which is what the WebSocket model kept tripping over. HTTP is hand-rolled over
+    // TcpListener because Unity's Mono runtime doesn't reliably implement HttpListener.
     internal sealed class ClientConnection
     {
-        private const string WebSocketGuid = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
+        private const int MaxHeaderBytes = 16384;
+        private const int MaxBodyBytes = 64 * 1024 * 1024; // guard against a bogus Content-Length
 
         private readonly TcpClient tcp;
         private readonly NetworkStream stream;
 
-        // A WebSocket forbids overlapping writes, and a request's response can race a log
-        // broadcast on the same socket; this serializes every write to the client.
-        private readonly SemaphoreSlim sendLock = new SemaphoreSlim(1, 1);
-
-        // Diagnostics (the remote endpoint is captured now because it's unavailable after close).
         public string RemoteEndPoint { get; }
-        public DateTime ConnectedAtUtc { get; }
 
         private ClientConnection(TcpClient tcp, NetworkStream stream)
         {
@@ -37,261 +31,96 @@ namespace UnityMCP.Editor
             this.stream = stream;
             try { RemoteEndPoint = tcp.Client.RemoteEndPoint?.ToString(); } catch { /* ignore */ }
             if (string.IsNullOrEmpty(RemoteEndPoint)) RemoteEndPoint = "unknown";
-            ConnectedAtUtc = DateTime.UtcNow;
         }
 
-        // Performs the WebSocket upgrade handshake. Returns a ready connection, or null if the
-        // request wasn't a valid WebSocket upgrade (the caller closes the socket in that case).
-        public static async Task<ClientConnection> AcceptAsync(TcpClient tcp, CancellationToken token)
+        public static ClientConnection Create(TcpClient tcp)
         {
             tcp.NoDelay = true;
-            // Cap synchronous sends at the socket level (SO_SNDTIMEO). The only synchronous send is
-            // the teardown "reloading" notify (TrySendTextBlocking) on the main thread during
-            // beforeAssemblyReload. Without this, a write to a wedged client (its receive buffer
-            // full, so the TCP send window is zero) blocks until the OS abandons the send - ~2
-            // minutes - which freezes the whole domain reload (the old domain can't unload while a
-            // thread sits in that native write). Unity's Mono does NOT honor NetworkStream.
-            // WriteTimeout for this, so we set the socket option directly. Async sends (normal
-            // responses, log broadcasts) ignore SO_SNDTIMEO, so this only bounds teardown.
-            try { tcp.SendTimeout = 1000; } catch { }
+            // Abortive close: Close() sends a RST and discards buffers immediately rather than doing a
+            // graceful FIN, so teardown never waits on the network even if the peer stopped reading.
+            // Exchanges are short-lived, so this only matters in the rare reload-mid-request window.
+            try { tcp.LingerState = new LingerOption(true, 0); } catch { /* ignore */ }
+            return new ClientConnection(tcp, tcp.GetStream());
+        }
 
-            // Abortive close: on Close() send a RST and discard buffered data immediately instead of a
-            // graceful FIN. Teardown (StopServer during beforeAssemblyReload) must never wait on the
-            // network, and a graceful close to a wedged client can stall on the TCP send/timeout. A RST
-            // also forces any in-flight send (sync OR async) on that socket to error out at once, so no
-            // thread can sit in a native socket op and hold up the domain unload. Clients just see a
-            // reset and reconnect, which they already handle.
-            try { tcp.LingerState = new LingerOption(true, 0); } catch { }
+        // Reads one HTTP request and returns its method (e.g. "POST", "GET") and body (the JSON
+        // command, or "" when there's no body). Returns null if the connection closed or the request
+        // was malformed/oversized. Reads the request line + headers up to the blank line (one byte at a
+        // time so we never over-read into the body), then Content-Length bytes of body.
+        public async Task<(string method, string body)?> ReadRequestAsync(CancellationToken token)
+        {
+            string headerText = await ReadHeadersAsync(token).ConfigureAwait(false);
+            if (string.IsNullOrEmpty(headerText)) return null;
 
-            var stream = tcp.GetStream();
-            if (!await PerformHandshake(stream, token).ConfigureAwait(false))
+            var lines = headerText.Split(new[] { "\r\n" }, StringSplitOptions.None);
+
+            // Request line: "METHOD SP request-target SP HTTP-version".
+            string method = lines[0].Split(' ')[0].ToUpperInvariant();
+
+            int contentLength = 0;
+            foreach (var line in lines)
             {
-                return null;
+                if (line.StartsWith("Content-Length:", StringComparison.OrdinalIgnoreCase))
+                {
+                    int.TryParse(line.Substring("Content-Length:".Length).Trim(), out contentLength);
+                    break;
+                }
             }
-            return new ClientConnection(tcp, stream);
+
+            if (contentLength > MaxBodyBytes) return null;
+            if (contentLength <= 0) return (method, "");    // no body (e.g. a health GET, or a POST
+                                                            // that omitted Content-Length)
+
+            var body = new byte[contentLength];
+            int read = 0;
+            while (read < contentLength)
+            {
+                int n = await stream.ReadAsync(body, read, contentLength - read, token).ConfigureAwait(false);
+                if (n == 0) return null;                    // closed before the full body arrived
+                read += n;
+            }
+            return (method, Encoding.UTF8.GetString(body));
+        }
+
+        // Writes a JSON HTTP response and flushes (e.g. statusCode 200 "OK", 400 "Bad Request").
+        // Content-Length always reflects the body; pass includeBody=false for a HEAD request, which
+        // gets the same status and headers but no body.
+        public async Task WriteJsonResponseAsync(int statusCode, string statusText, string json, bool includeBody, CancellationToken token)
+        {
+            var bodyBytes = Encoding.UTF8.GetBytes(json ?? "");
+            var header =
+                $"HTTP/1.1 {statusCode} {statusText}\r\n" +
+                "Content-Type: application/json; charset=utf-8\r\n" +
+                $"Content-Length: {bodyBytes.Length}\r\n" +
+                "Connection: close\r\n\r\n";
+            var headerBytes = Encoding.ASCII.GetBytes(header);
+            await stream.WriteAsync(headerBytes, 0, headerBytes.Length, token).ConfigureAwait(false);
+            if (includeBody && bodyBytes.Length > 0)
+                await stream.WriteAsync(bodyBytes, 0, bodyBytes.Length, token).ConfigureAwait(false);
+            await stream.FlushAsync(token).ConfigureAwait(false);
         }
 
         public void Close()
         {
-            try { tcp.Close(); } catch { }
+            try { tcp.Close(); } catch { /* ignore */ }
         }
 
-        public Task SendTextAsync(string message, CancellationToken token)
+        // Reads bytes one at a time until the CRLFCRLF that ends the HTTP headers, so we stop exactly
+        // at the header/body boundary and don't consume any body bytes. Returns null on close/overflow.
+        private async Task<string> ReadHeadersAsync(CancellationToken token)
         {
-            return SendFrameAsync(0x1, Encoding.UTF8.GetBytes(message), token);
-        }
-
-        // Best-effort synchronous text send for teardown (e.g. beforeAssemblyReload), where the
-        // domain is about to unload and async writes may not flush in time. Writes the frame
-        // directly with a short, bounded wait for the send lock; never throws. Returns false if it
-        // couldn't send (a write was already in flight, or the socket is gone).
-        public bool TrySendTextBlocking(string message, int timeoutMs = 250)
-        {
-            var frame = BuildFrame(0x1, Encoding.UTF8.GetBytes(message));
-            bool locked = false;
-            try
+            var bytes = new List<byte>(512);
+            var one = new byte[1];
+            while (bytes.Count < MaxHeaderBytes)
             {
-                locked = sendLock.Wait(timeoutMs);
-                if (!locked) return false; // a write is in flight; don't risk interleaving frames
-
-                // Bound the socket write itself, not just the lock wait above. A synchronous Write
-                // to a wedged client (its receive buffer full, so the TCP send window is zero) has
-                // NO timeout by default and blocks until the OS abandons the send - which can be
-                // minutes. This runs on the main thread during beforeAssemblyReload, so an unbounded
-                // write there freezes the entire domain reload (observed: a ~7-minute editor hang
-                // under a reconnect storm). WriteTimeout makes the Write throw instead.
-                try { stream.WriteTimeout = timeoutMs; } catch { }
-                stream.Write(frame, 0, frame.Length);
-                stream.Flush();
-                return true;
-            }
-            catch
-            {
-                return false; // socket already gone, or the bounded write timed out; nothing to do
-            }
-            finally
-            {
-                try { stream.WriteTimeout = Timeout.Infinite; } catch { }
-                if (locked) sendLock.Release();
-            }
-        }
-
-        // Returns the next complete text message, or null when the connection closes. Handles
-        // fragmentation, client masking, ping/pong, and close frames.
-        public async Task<string> ReceiveMessageAsync(CancellationToken token)
-        {
-            var payload = new List<byte>();
-
-            while (true)
-            {
-                var header = await ReadExactlyAsync(2, token).ConfigureAwait(false);
-                if (header == null) return null;
-
-                bool fin = (header[0] & 0x80) != 0;
-                int opcode = header[0] & 0x0F;
-                bool masked = (header[1] & 0x80) != 0;
-                long len = header[1] & 0x7F;
-
-                if (len == 126)
-                {
-                    var ext = await ReadExactlyAsync(2, token).ConfigureAwait(false);
-                    if (ext == null) return null;
-                    len = (ext[0] << 8) | ext[1];
-                }
-                else if (len == 127)
-                {
-                    var ext = await ReadExactlyAsync(8, token).ConfigureAwait(false);
-                    if (ext == null) return null;
-                    len = 0;
-                    for (int i = 0; i < 8; i++) len = (len << 8) | ext[i];
-                }
-
-                byte[] mask = null;
-                if (masked)
-                {
-                    mask = await ReadExactlyAsync(4, token).ConfigureAwait(false);
-                    if (mask == null) return null;
-                }
-
-                var data = len > 0
-                    ? await ReadExactlyAsync((int)len, token).ConfigureAwait(false)
-                    : new byte[0];
-                if (data == null) return null;
-
-                if (masked)
-                {
-                    for (int i = 0; i < data.Length; i++) data[i] ^= mask[i % 4];
-                }
-
-                switch (opcode)
-                {
-                    case 0x8: // close
-                        try { await SendFrameAsync(0x8, new byte[0], token).ConfigureAwait(false); } catch { }
-                        return null;
-                    case 0x9: // ping -> pong with same payload
-                        await SendFrameAsync(0xA, data, token).ConfigureAwait(false);
-                        continue;
-                    case 0xA: // pong - ignore
-                        continue;
-                    default: // 0x0 continuation, 0x1 text, 0x2 binary
-                        payload.AddRange(data);
-                        break;
-                }
-
-                if (fin)
-                {
-                    return Encoding.UTF8.GetString(payload.ToArray());
-                }
-                // otherwise keep reading continuation frames
-            }
-        }
-
-        private async Task SendFrameAsync(int opcode, byte[] payload, CancellationToken token)
-        {
-            var frame = BuildFrame(opcode, payload);
-            await sendLock.WaitAsync(token).ConfigureAwait(false);
-            try
-            {
-                await stream.WriteAsync(frame, 0, frame.Length, token).ConfigureAwait(false);
-            }
-            finally
-            {
-                sendLock.Release();
-            }
-        }
-
-        // Server-to-client frames are never masked.
-        private static byte[] BuildFrame(int opcode, byte[] payload)
-        {
-            var header = new List<byte> { (byte)(0x80 | (opcode & 0x0F)) };
-            int len = payload.Length;
-            if (len <= 125)
-            {
-                header.Add((byte)len);
-            }
-            else if (len <= 65535)
-            {
-                header.Add(126);
-                header.Add((byte)((len >> 8) & 0xFF));
-                header.Add((byte)(len & 0xFF));
-            }
-            else
-            {
-                header.Add(127);
-                long wide = len; // promote so shifts past 31 bits are correct
-                for (int i = 7; i >= 0; i--) header.Add((byte)((wide >> (8 * i)) & 0xFF));
-            }
-
-            var frame = new byte[header.Count + payload.Length];
-            for (int i = 0; i < header.Count; i++) frame[i] = header[i];
-            Buffer.BlockCopy(payload, 0, frame, header.Count, payload.Length);
-            return frame;
-        }
-
-        private async Task<byte[]> ReadExactlyAsync(int count, CancellationToken token)
-        {
-            var buf = new byte[count];
-            int off = 0;
-            while (off < count)
-            {
-                int n = await stream.ReadAsync(buf, off, count - off, token).ConfigureAwait(false);
+                int n = await stream.ReadAsync(one, 0, 1, token).ConfigureAwait(false);
                 if (n == 0) return null; // closed
-                off += n;
-            }
-            return buf;
-        }
-
-        // --- WebSocket upgrade handshake (RFC 6455 server side) ---
-
-        private static async Task<bool> PerformHandshake(NetworkStream stream, CancellationToken token)
-        {
-            var headerText = await ReadHttpHeadersAsync(stream, token).ConfigureAwait(false);
-            if (string.IsNullOrEmpty(headerText)) return false;
-
-            string key = null;
-            foreach (var line in headerText.Split(new[] { "\r\n" }, StringSplitOptions.None))
-            {
-                if (line.StartsWith("Sec-WebSocket-Key:", StringComparison.OrdinalIgnoreCase))
+                bytes.Add(one[0]);
+                int c = bytes.Count;
+                if (c >= 4 && bytes[c - 1] == (byte)'\n' && bytes[c - 2] == (byte)'\r' &&
+                    bytes[c - 3] == (byte)'\n' && bytes[c - 4] == (byte)'\r')
                 {
-                    key = line.Substring("Sec-WebSocket-Key:".Length).Trim();
-                    break;
-                }
-            }
-            if (string.IsNullOrEmpty(key)) return false;
-
-            string accept;
-            using (var sha1 = SHA1.Create())
-            {
-                accept = Convert.ToBase64String(
-                    sha1.ComputeHash(Encoding.UTF8.GetBytes(key + WebSocketGuid)));
-            }
-
-            var response =
-                "HTTP/1.1 101 Switching Protocols\r\n" +
-                "Upgrade: websocket\r\n" +
-                "Connection: Upgrade\r\n" +
-                "Sec-WebSocket-Accept: " + accept + "\r\n\r\n";
-            var bytes = Encoding.ASCII.GetBytes(response);
-            await stream.WriteAsync(bytes, 0, bytes.Length, token).ConfigureAwait(false);
-            return true;
-        }
-
-        // Read HTTP request headers one byte at a time, stopping exactly at the blank line so we
-        // don't consume any bytes of the first WebSocket frame that follows.
-        private static async Task<string> ReadHttpHeadersAsync(NetworkStream stream, CancellationToken token)
-        {
-            var sb = new StringBuilder();
-            var buf = new byte[1];
-            while (sb.Length < 16384)
-            {
-                int n = await stream.ReadAsync(buf, 0, 1, token).ConfigureAwait(false);
-                if (n == 0) return null; // closed
-                sb.Append((char)buf[0]);
-                if (sb.Length >= 4 && sb[sb.Length - 1] == '\n' &&
-                    sb[sb.Length - 2] == '\r' && sb[sb.Length - 3] == '\n' &&
-                    sb[sb.Length - 4] == '\r')
-                {
-                    return sb.ToString();
+                    return Encoding.ASCII.GetString(bytes.ToArray());
                 }
             }
             return null; // headers too large

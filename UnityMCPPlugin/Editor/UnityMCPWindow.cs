@@ -25,7 +25,7 @@ namespace UnityMCP.Editor
         }
 
         // Repaint a couple of times a second so the live values (uptime, "x ago",
-        // connected durations, queue depth) keep ticking while the window is open.
+        // queue depth) keep ticking while the window is open.
         void Tick()
         {
             if (EditorApplication.timeSinceStartup - lastRepaint >= 0.5)
@@ -44,8 +44,6 @@ namespace UnityMCP.Editor
                 EditorGUILayout.Space(5);
 
                 DrawServerStatus();
-                EditorGUILayout.Space(5);
-                DrawClients();
                 EditorGUILayout.Space(5);
                 DrawAddress();
                 EditorGUILayout.Space(5);
@@ -91,31 +89,6 @@ namespace UnityMCP.Editor
             EditorGUILayout.EndHorizontal();
         }
 
-        // How many MCP clients (Claude sessions) are attached, with each one's remote endpoint and
-        // how long it's been connected. With the server healthy, zero clients is normal (idle).
-        private static void DrawClients()
-        {
-            var clients = UnityMCPConnection.GetConnectedClients();
-            EditorGUILayout.BeginHorizontal(EditorStyles.helpBox);
-            EditorGUILayout.LabelField("MCP Clients:", GUILayout.Width(110));
-            GUI.color = clients.Length > 0 ? Color.green : Color.gray;
-            EditorGUILayout.LabelField(
-                clients.Length > 0 ? $"Connected ({clients.Length})" : "None connected",
-                EditorStyles.boldLabel);
-            GUI.color = Color.white;
-            EditorGUILayout.EndHorizontal();
-
-            foreach (var c in clients)
-            {
-                EditorGUILayout.BeginHorizontal();
-                GUILayout.Space(24);
-                EditorGUILayout.LabelField(
-                    $"{c.Endpoint}  ·  {FormatDuration(DateTime.UtcNow - c.ConnectedAtUtc)}",
-                    EditorStyles.miniLabel);
-                EditorGUILayout.EndHorizontal();
-            }
-        }
-
         private static void DrawAddress()
         {
             EditorGUILayout.BeginHorizontal(EditorStyles.helpBox);
@@ -156,7 +129,7 @@ namespace UnityMCP.Editor
         {
             bool current = UnityMCPConnection.IsLoggingEnabled;
             bool updated = EditorGUILayout.ToggleLeft(
-                $"Forward Unity logs to clients  (buffered: {UnityMCPConnection.BufferedLogCount})",
+                $"Buffer Unity logs for get_logs  (buffered: {UnityMCPConnection.BufferedLogCount})",
                 current);
             if (updated != current)
             {

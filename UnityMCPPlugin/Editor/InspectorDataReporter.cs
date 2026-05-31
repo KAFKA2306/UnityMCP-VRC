@@ -162,6 +162,9 @@ namespace UnityMCP.Editor
             return sb.ToString();
         }
 
+        // Surfaces size/asset info the plain field+property reflection above deliberately skips
+        // (those accessors are in the skip-list or instantiate copies): renderer/mesh bounds, vertex
+        // counts, and shared mesh/material names - all read without instantiating anything.
         private void AddSpecialComponentData(Component comp, Dictionary<string, object> data)
         {
             if (comp is Renderer renderer)
@@ -195,8 +198,12 @@ namespace UnityMCP.Editor
             }
         }
 
-        // Converts an arbitrary field/property value into something JSON-friendly and bounded.
-        // depth tracks how far we've recursed into nested user types so the payload stays bounded.
+        // Converts an arbitrary field/property value into something JSON-friendly and bounded. The
+        // strategy: render primitives, Unity math structs, and asset/scene-object references inline;
+        // cap any collection to MaxCollectionElements; and expand a user-defined type's own fields one
+        // level deeper while stubbing Unity/BCL "framework" types as { type } (so we don't dump noise
+        // like a Matrix4x4's 16 floats). The two caps work on different axes - MaxCollectionElements
+        // bounds breadth, `depth`/MaxDepth bounds nesting - so even a deep, wide graph stays bounded.
         private object SummarizeValue(object val, int depth = 0)
         {
             if (val == null) return null;

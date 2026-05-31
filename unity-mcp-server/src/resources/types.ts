@@ -9,9 +9,9 @@ export interface ResourceDefinition {
 
 export interface ResourceContext {
   unityConnection: UnityConnection;
-  // Add any other context properties needed by resources
 }
 
+// A readable MCP resource (exposed as file:///<name>) the client can pull in for extra context.
 export interface Resource {
   getDefinition(): ResourceDefinition;
   getContents(context: ResourceContext): Promise<string>;

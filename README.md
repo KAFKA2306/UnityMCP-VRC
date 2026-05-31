@@ -1,9 +1,9 @@
 # UnityMCP-VRC
 
 Drive the Unity Editor from Claude (or any MCP client). A Unity Editor **plugin** hosts
-a WebSocket server inside the Editor, and a small **MCP server** (Node/TypeScript)
-connects to it and exposes tools to Claude — run C# in the Editor, read editor/scene
-state, and stream Unity console logs.
+a small HTTP server inside the Editor, and a small **MCP server** (Node/TypeScript) sends
+it one request per tool call and exposes the tools to Claude — run C# in the Editor, read
+editor/scene state, and pull Unity console logs.
 
 Forked from [Arodoid/UnityMCP](https://github.com/Arodoid/UnityMCP) and extensively
 refactored, with a focus on using Claude to build **VRChat / UdonSharp** worlds — though
@@ -12,15 +12,15 @@ most of it works for ordinary Unity development too. The `take_screenshot` and
 and adapted to this project's connection model.
 
 <p align="center">
-  <img src="docs/screenshot.png" alt="The UnityMCP Debug Window: server listening with six Claude sessions connected to one Editor" width="420"><br>
-  <em>The Debug Window — six Claude sessions attached to a single Editor on <code>ws://localhost:8080</code>.</em>
+  <img src="docs/screenshot.png" alt="The UnityMCP Debug Window showing the in-Editor server listening" width="420"><br>
+  <em>The Debug Window — the plugin's HTTP server listening on <code>http://localhost:8080</code>.</em>
 </p>
 
 ## Highlights
 
-- **One Editor, many Claude sessions.** The plugin hosts the server, so any number of
-  Claude sessions can drive the same Editor at once — no fixed-port race, no
-  "connected-but-dead" zombie servers.
+- **One Editor, many Claude sessions.** The plugin hosts the HTTP server, so any number of
+  Claude sessions drive the same Editor at once — no fixed-port race, no "connected-but-dead"
+  zombie servers.
 - **Run real C#.** `execute_editor_command` runs LLM-authored C# (its own `using`s,
   classes, functions) with assembly references auto-discovered from everything loaded —
   UnityEngine, packages, VRChat/UdonSharp, project scripts — no hand-maintained list.
@@ -29,10 +29,11 @@ and adapted to this project's connection model.
 - **See what it's doing.** `take_screenshot` renders the Scene or game camera back to Claude
   as an image, and `get_object_details` dumps a GameObject's components/bounds — so visual
   iteration and inspection don't need hand-written C# each time.
-- **Survives recompiles.** Domain reloads tear the link down cleanly and clients
-  auto-reconnect; requests sent during a reload wait for the link to return instead of failing.
-- **Live Debug Window.** Shows whether the server is actually listening, which clients
-  are attached, last request, and the main-thread queue — so a broken link is obvious.
+- **Survives recompiles.** A domain reload just drops the HTTP listener for a moment — there's
+  no persistent socket to tear down, so a request sent during one simply retries until the Editor
+  is back.
+- **Live Debug Window.** Shows whether the server is listening, the last request, and the
+  main-thread queue — so a broken link is obvious.
 - **VRChat helpers + MCP resources** to raise Claude's UdonSharp success rate.
 
 ## Tools
@@ -43,7 +44,7 @@ and adapted to this project's connection model.
 | `get_editor_state`       | Returns Unity/scene/project state on demand (bounded).              |
 | `get_object_details`     | Inspects one GameObject: transform, components, and size info (Renderer bounds, mesh vertex counts, shared mesh/material names). |
 | `get_logs`               | Returns recent Unity console logs.                                  |
-| `clear_logs`             | Clears the server's buffered console logs (e.g. stale errors from a failed snippet) so later `get_logs` reads aren't ambiguous. |
+| `clear_logs`             | Clears the Editor's buffered console logs (e.g. stale errors from a failed snippet) so later `get_logs` reads aren't ambiguous. |
 | `take_screenshot`        | Renders the Scene view or game camera to a JPEG/PNG image, so Claude can see the result of edits. |
 | `get_command_page`       | Fetches later pages of any oversized tool result that was paged — `execute_editor_command`, `get_object_details`, `get_editor_state` (used automatically). |
 
@@ -99,14 +100,17 @@ More detail in [docs/001 — Architecture](docs/001-architecture.md#known-limita
 - **[001 — Architecture](docs/001-architecture.md)** — how it works now: connection
   model, wire protocol, threading, lifecycle, tools, file map, limits. Start here.
 - [002 — Design decisions](docs/002-design-decisions.md) — the *why* behind the
-  architecture: the inverted connection, server-side paging, domain-reload handling, and
-  the heartbeat call.
+  architecture: the inverted stateless connection, server-side paging, and a note on the
+  WebSocket transport we replaced.
 - [003 — Changes from the original fork](docs/003-changes-from-upstream.md) — how this
   repo diverges from upstream [Arodoid/UnityMCP](https://github.com/Arodoid/UnityMCP):
   the inverted topology, VRChat/UdonSharp support, paging, and the relicense.
 - [004 — Unity Editor states](docs/004-unity-editor-states.md) — the Editor lifecycle the
   plugin survives: compiling, domain reload, play-mode, focus/throttling — when each happens
   and what it means for a command in flight.
+- [005 — Executing LLM C#](docs/005-executing-csharp.md) — the command sandbox: how
+  LLM-authored C# is compiled (auto-discovered references incl. the BCL facades) and run, result
+  and log capture, output bounding, and the trust model.
 
 ## License
 
