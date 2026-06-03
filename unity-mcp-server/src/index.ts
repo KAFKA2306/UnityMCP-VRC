@@ -12,6 +12,7 @@ import {
 import { UnityConnection } from "./communication/UnityConnection.js";
 import { getAllResources, ResourceContext } from "./resources/index.js";
 import { getAllTools, ToolContext } from "./tools/index.js";
+import { requireComment } from "./tools/comment.js";
 
 class UnityMCPServer {
   private server: Server;
@@ -104,9 +105,10 @@ class UnityMCPServer {
   private setupTools() {
     const tools = getAllTools();
 
-    // Advertise the available tools and their schemas.
+    // Advertise the available tools and their schemas. requireComment injects a required `comment`
+    // field into every tool's schema centrally, so all current and future tools get it uniformly.
     this.server.setRequestHandler(ListToolsRequestSchema, async () => ({
-      tools: tools.map((tool) => tool.getDefinition()),
+      tools: tools.map((tool) => requireComment(tool.getDefinition())),
     }));
 
     // Dispatch a tool call to the matching tool.
@@ -126,13 +128,29 @@ class UnityMCPServer {
         );
       }
 
+      // Every call must carry a comment (the schema marks it required; this is the server-side
+      // backstop for clients that don't validate). It's the operator-facing "why" shown live in the
+      // Unity debug window's recent-calls panel.
+      const comment =
+        typeof args?.comment === "string" ? args.comment.trim() : "";
+      if (!comment) {
+        throw new McpError(
+          ErrorCode.InvalidParams,
+          `The 'comment' parameter is required: a brief, one-sentence note on why you're calling ${name}. ` +
+            "It's shown live in the Unity Editor's UnityMCP debug window.",
+        );
+      }
+
       // No connection gate here. Tools that talk to Unity go through UnityConnection.sendRequest,
       // which retries (bounded) a refused connection before giving up - so a request issued during a
       // domain reload pauses for the bounce instead of failing, and a genuinely-down Editor surfaces
       // a clear message. get_command_page is the exception: it reads the in-memory page cache and
       // never calls Unity, so it works regardless of connection state.
+      //
+      // forComment binds this call's comment to the connection so every request the tool sends is
+      // stamped with it, with no per-tool plumbing.
       const toolContext: ToolContext = {
-        unityConnection: this.unityConnection,
+        unityConnection: this.unityConnection.forComment(comment),
       };
 
       return await tool.execute(args, toolContext);

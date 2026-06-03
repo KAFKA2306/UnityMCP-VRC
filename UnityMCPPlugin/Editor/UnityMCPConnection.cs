@@ -41,6 +41,13 @@ namespace UnityMCP.Editor
         private static string lastErrorMessage = "";
         private static readonly Queue<LogEntry> logBuffer = new Queue<LogEntry>();
         private static readonly int maxLogBufferSize = 1000;
+
+        // Ring buffer of the most recent tool calls, surfaced live in the debug window so the
+        // developer can watch what Claude is doing - each call carries a `comment` explaining why.
+        // Capped; oldest entries drop off. Written from background request threads and read from the
+        // main-thread OnGUI, so every access locks the queue (as logBuffer does).
+        private static readonly Queue<CallRecord> recentCalls = new Queue<CallRecord>();
+        private const int maxRecentCalls = 50;
         private static bool isLoggingEnabled = true;
         private static readonly EditorStateReporter editorStateReporter = new EditorStateReporter();
 
@@ -61,6 +68,30 @@ namespace UnityMCP.Editor
         public static DateTime LastRequestUtc => lastRequestUtc;
         public static int TotalRequestCount => totalRequests;
         public static int BufferedLogCount { get { lock (logBuffer) { return logBuffer.Count; } } }
+
+        // A snapshot of one recorded call, handed to the debug window for display.
+        public struct RecentCall
+        {
+            public string Type;
+            public string Comment;
+            public DateTime Utc;
+        }
+
+        // Newest-first snapshot of the recent-call ring buffer, for the debug window's panel.
+        public static RecentCall[] GetRecentCalls()
+        {
+            lock (recentCalls)
+            {
+                var arr = new RecentCall[recentCalls.Count];
+                // The queue iterates oldest-first; fill back-to-front so index 0 is the newest call.
+                int i = recentCalls.Count - 1;
+                foreach (var c in recentCalls)
+                {
+                    arr[i--] = new RecentCall { Type = c.Type, Comment = c.Comment, Utc = c.Utc };
+                }
+                return arr;
+            }
+        }
 
         public static bool IsLoggingEnabled
         {
@@ -85,6 +116,13 @@ namespace UnityMCP.Editor
             public string StackTrace { get; set; }
             public LogType Type { get; set; }
             public DateTime Timestamp { get; set; }
+        }
+
+        private class CallRecord
+        {
+            public string Type { get; set; }
+            public string Comment { get; set; }
+            public DateTime Utc { get; set; }
         }
 
         // Manual restart from the debug window (e.g. after a port-bind failure is resolved).
@@ -264,6 +302,20 @@ namespace UnityMCP.Editor
                 string dataJson = msg != null && msg.ContainsKey("data") && msg["data"] != null
                     ? msg["data"].ToString()
                     : "{}";
+                // The operator-facing "why this call" note, carried alongside type/data in the
+                // envelope. Null for internal/legacy callers that don't send one.
+                string comment = msg != null && msg.ContainsKey("comment") && msg["comment"] != null
+                    ? msg["comment"].ToString()
+                    : null;
+
+                // Record every recognized command in the recent-calls ring buffer shown live in the
+                // debug window. (get_command_page never reaches Unity, so it can't appear here.)
+                if (type == "executeEditorCommand" || type == "getEditorState" ||
+                    type == "takeScreenshot" || type == "getGameObjectDetails" ||
+                    type == "getLogs" || type == "clearLogs")
+                {
+                    RecordCall(type, comment);
+                }
 
                 // Count only the "real work" calls in the debug-window telemetry, not log fetches.
                 if (type == "executeEditorCommand" || type == "getEditorState" ||
@@ -356,6 +408,20 @@ namespace UnityMCP.Editor
                 logBuffer.Clear();
             }
             return new { cleared };
+        }
+
+        // Append one call to the recent-calls ring buffer, evicting the oldest past the cap.
+        private static void RecordCall(string type, string comment)
+        {
+            var record = new CallRecord { Type = type, Comment = comment, Utc = DateTime.UtcNow };
+            lock (recentCalls)
+            {
+                recentCalls.Enqueue(record);
+                while (recentCalls.Count > maxRecentCalls)
+                {
+                    recentCalls.Dequeue();
+                }
+            }
         }
 
         private static void HandleLogMessage(string message, string stackTrace, LogType type)

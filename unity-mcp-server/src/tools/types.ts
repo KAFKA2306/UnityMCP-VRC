@@ -1,4 +1,4 @@
-import { UnityConnection } from "../communication/UnityConnection.js";
+import { RequestSender } from "../communication/UnityConnection.js";
 
 export interface LogEntry {
   message: string;
@@ -30,9 +30,11 @@ export interface ToolDefinition {
   };
 }
 
-// What a tool's execute() receives: the live Unity connection (logs are fetched through it now).
+// What a tool's execute() receives: a request sender bound to this call. It's a per-call view of
+// the live Unity connection that stamps each request with the call's `comment` (logs are fetched
+// through it too). Tools just call unityConnection.sendRequest as before.
 export interface ToolContext {
-  unityConnection: UnityConnection;
+  unityConnection: RequestSender;
 }
 
 export interface Tool {

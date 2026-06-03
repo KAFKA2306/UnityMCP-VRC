@@ -63,6 +63,29 @@ request in flight) — there's no persistent connection to drain. The `[Initiali
 constructor re-runs in the new domain and restarts the server; a client request that lands mid-reload
 is refused and retries until it's back.
 
+### When a reload is slow
+
+Most of a reload's wall-time is usually the single `Loaded All Assemblies, in N seconds` step —
+loading the freshly-built assemblies into the new domain. The named profiling sub-phases
+(`ProcessInitializeOnLoad`, object restore, the `beforeAssemblyReload` callbacks) are typically small
+by comparison. On **Windows** that load step is frequently dominated by **real-time antivirus
+scanning the just-compiled `Assembly-CSharp*.dll`**: a cold scan can push it to 15–20 s where a
+cached load is ~2–3 s, so the slow reloads are specifically the **script-compilation** ones (fresh
+DLLs), not play-mode toggles.
+
+The fix is antivirus exclusions for the project's `Library/` folder, the Unity editor install, and
+the `Unity.exe`/`bee_backend.exe` processes — applied in **every** active real-time scanner, since a
+machine can run more than one (e.g. Windows Defender alongside a vendor/endpoint agent such as HP Wolf
+Pro Security, which has its own console and won't honor Defender's exclusion list). Expect each slow
+reload to drop from ~20 s to ~3 s.
+
+To measure it, launch the Editor with the `-timestamps` command-line argument and watch the
+`Loaded All Assemblies` line and the `Domain Reload Profiling:` block in `Editor.log`. A small
+`[InitializeOnLoad]` class that brackets `AssemblyReloadEvents.beforeAssemblyReload` →
+`afterAssemblyReload` and logs the elapsed time gives the true wall-time directly — the start
+timestamp has to ride in `SessionState`, since statics don't survive the reload (see [Surviving a
+reload](#surviving-a-reload-state-persistence) below).
+
 ## 3. Play Mode transitions
 
 `EditorApplication.playModeStateChanged` walks `ExitingEditMode → EnteredPlayMode` and

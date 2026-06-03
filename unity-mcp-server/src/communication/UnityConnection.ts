@@ -6,7 +6,15 @@
 // kept stalling the reload). Stateless request/response collapses all of that into "POST a command,
 // read the response" plus a bounded retry when the Editor is briefly unreachable (mid-reload or not
 // started yet). Unity still owns the one port, so any number of MCP servers share one Editor.
-export class UnityConnection {
+
+// The minimal surface a tool needs: send one request and await its response. Tools receive this
+// (not the concrete UnityConnection) so a per-call view can transparently stamp every request with
+// the caller's comment - see UnityConnection.forComment.
+export interface RequestSender {
+  sendRequest(type: string, data: any, timeoutMs?: number): Promise<any>;
+}
+
+export class UnityConnection implements RequestSender {
   private readonly baseUrl: string;
   private shuttingDown = false;
 
@@ -27,10 +35,22 @@ export class UnityConnection {
   // - connection *reset* mid-request (Editor likely started reloading after we sent) -> NOT retried,
   //   surfaced as "may have applied" since a non-idempotent command might have run;
   // - timeout -> surfaced with the usual unfocused/busy hint.
+  // A per-call view of this connection that stamps every request it sends with `comment` - the
+  // operator-facing "why this call" note shown live in the Unity debug window's recent-calls panel.
+  // Tools call sendRequest exactly as before; the comment rides along in the envelope without each
+  // tool having to thread it through.
+  public forComment(comment?: string): RequestSender {
+    return {
+      sendRequest: (type, data, timeoutMs) =>
+        this.sendRequest(type, data, timeoutMs, comment),
+    };
+  }
+
   public async sendRequest(
     type: string,
     data: any,
     timeoutMs: number = 60_000,
+    comment?: string,
   ): Promise<any> {
     if (this.shuttingDown) throw new Error("MCP server shutting down.");
 
@@ -45,7 +65,9 @@ export class UnityConnection {
         const res = await fetch(this.baseUrl, {
           method: "POST",
           headers: { "content-type": "application/json" },
-          body: JSON.stringify({ type, data }),
+          // comment is undefined for internal/legacy callers; JSON.stringify drops it, so Unity
+          // simply sees no comment key and the envelope is unchanged.
+          body: JSON.stringify({ type, data, comment }),
           signal: controller.signal,
         });
 

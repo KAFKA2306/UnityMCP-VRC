@@ -92,6 +92,15 @@ Prompt Claude; if a script errors, diagnose it in **UnityMCP > Script Tester**.
 - **Calls stall or time out?** The Editor throttles while unfocused — watch the *Editor*
   row's queue depth. Refocus Unity, or use *Preferences > General > Interaction Mode >
   No Throttling* for background use.
+- **Domain reloads take 10–20 s+ (Unity stuck on "Reloading Domain…")?** On Windows this is
+  usually **antivirus scanning the freshly-compiled assemblies** — it shows up as a long
+  `Loaded All Assemblies, in N seconds` line in the Editor log, and only after a recompile. Add
+  real-time-scan exclusions for your project's `Library/` folder, the Unity editor install, and the
+  `Unity.exe`/`bee_backend.exe` processes — in **every** active scanner (a machine can run more than
+  one, e.g. Windows Defender *and* a vendor agent such as HP Wolf Pro Security). Reloads typically
+  fall from ~20 s to ~3 s; since an `execute_editor_command` that writes a `.cs` triggers a reload,
+  this directly speeds up the MCP loop. Detail:
+  [docs/004 — when a reload is slow](docs/004-unity-editor-states.md#when-a-reload-is-slow).
 
 More detail in [docs/001 — Architecture](docs/001-architecture.md#known-limitations--possible-next-steps).
 

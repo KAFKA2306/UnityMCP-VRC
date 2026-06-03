@@ -7,6 +7,7 @@ namespace UnityMCP.Editor
     public class UnityMCPWindow : EditorWindow
     {
         private double lastRepaint;
+        private Vector2 callsScroll;
 
         [MenuItem("UnityMCP/Debug Window", false, 1)]
         public static void ShowWindow()
@@ -53,6 +54,9 @@ namespace UnityMCP.Editor
 
                 EditorGUILayout.Space(8);
                 DrawLoggingToggle();
+
+                EditorGUILayout.Space(10);
+                DrawRecentCalls();
 
                 EditorGUILayout.Space(10);
                 if (GUILayout.Button("Restart Server", GUILayout.Height(30)))
@@ -123,6 +127,43 @@ namespace UnityMCP.Editor
             EditorGUILayout.LabelField($"{(compiling ? "Compiling…" : "Ready")}  ·  main-thread queue: {queued}");
             GUI.color = Color.white;
             EditorGUILayout.EndHorizontal();
+        }
+
+        // A scrollable log of the most recent tool calls (newest first): when it happened, which
+        // tool, and the call's comment - so the developer can watch what Claude is doing.
+        private void DrawRecentCalls()
+        {
+            var calls = UnityMCPConnection.GetRecentCalls();
+            EditorGUILayout.LabelField($"Recent calls ({calls.Length})", EditorStyles.boldLabel);
+
+            callsScroll = EditorGUILayout.BeginScrollView(callsScroll, GUILayout.Height(360));
+            if (calls.Length == 0)
+            {
+                EditorGUILayout.LabelField("No calls yet.", EditorStyles.miniLabel);
+            }
+            else
+            {
+                DateTime now = DateTime.UtcNow;
+                foreach (var c in calls)
+                {
+                    EditorGUILayout.BeginVertical(EditorStyles.helpBox);
+
+                    EditorGUILayout.BeginHorizontal();
+                    // Local wall-clock time plus a live "x ago" (the window repaints ~2x/sec).
+                    EditorGUILayout.LabelField(
+                        $"{c.Utc.ToLocalTime():HH:mm:ss}  ·  {FormatDuration(now - c.Utc)} ago",
+                        EditorStyles.miniLabel, GUILayout.Width(150));
+                    EditorGUILayout.LabelField(c.Type, EditorStyles.miniBoldLabel);
+                    EditorGUILayout.EndHorizontal();
+
+                    EditorGUILayout.LabelField(
+                        string.IsNullOrEmpty(c.Comment) ? "(no comment)" : c.Comment,
+                        EditorStyles.wordWrappedMiniLabel);
+
+                    EditorGUILayout.EndVertical();
+                }
+            }
+            EditorGUILayout.EndScrollView();
         }
 
         private static void DrawLoggingToggle()
