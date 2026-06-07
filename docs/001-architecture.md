@@ -10,26 +10,32 @@ UnityMCP has two halves:
   one HTTP request per tool call and exposes the tools to Claude.
 
 ```
-  Claude session A ──┐   one HTTP request per tool call
-  Claude session B ──┤   POST { type, data }  →  JSON result
-  Claude session C ──┘
-          │  http://localhost:8080
-          ▼
-   ┌─────────────────────────────┐
-   │  Unity Editor plugin        │   hosts the server · one Editor · many clients
-   └─────────────────────────────┘
+  Claude session A ─▶ MCP server ─┐  ① resolve the target instance via the registry
+  Claude session B ─▶ MCP server ─┤  ② POST { type, data } to its port  →  JSON result
+  Claude session C ─▶ MCP server ─┘
+                                   │
+        reads ◀────────────────────┘  ~/…/UnityMCP/instances/<id>.json  (name · port · pid)
+        │                                   ▲ each Editor writes its own record
+        ▼                                   │
+   ┌──────────────────────┐   ┌──────────────────────┐
+   │ Unity Editor "A" :p1 │   │ Unity Editor "B" :p2 │   each hosts its own HTTP server
+   └──────────────────────┘   └──────────────────────┘   on a dynamic port, self-registers
 ```
 
-Unity hosting the server (rather than each MCP-server process hosting its own) lets many Claude
-sessions share one Editor with no port race. The transport is **stateless request/response**; it
-began as a persistent WebSocket — see the [historical
-note](002-design-decisions.md#historical-the-websocket-transport-we-replaced) for why that's gone.
+Each Editor hosts its own server (rather than each MCP-server process hosting one) on an OS-assigned
+port, and publishes a small record to a shared per-user **registry directory**. An MCP server reads
+that directory to discover running Editors and resolve a chosen instance to its port — so many
+Editors and many Claude sessions coexist with no fixed-port race, and a session picks which Editor it
+drives. The transport is **stateless request/response**; it began as a persistent WebSocket — see the
+[historical note](002-design-decisions.md#historical-the-websocket-transport-we-replaced) for why
+that's gone.
 
 ## Connection model
 
-- **Unity hosts; clients send requests.** A single `TcpListener` on port `8080` (dual-stack
-  IPv4/IPv6) accepts connections; each carries **one** HTTP request and is then closed. Because Unity
-  owns the one port, any number of Claude sessions drive the same Editor — no race.
+- **Unity hosts; clients send requests.** Each Editor runs a `TcpListener` on an OS-assigned
+  **dynamic** port (dual-stack IPv4/IPv6); each connection carries **one** HTTP request and is then
+  closed. Any number of Claude sessions can drive the same Editor, and several Editors can run at
+  once — see [discovery & multiple instances](#discovery--multiple-instances).
 - **Request/response.** A tool call is `POST /` with a JSON `{ type, data }` body; the plugin runs it
   and returns the result as the JSON response body. No id-correlation, no persistent connection — the
   response *is* the reply.
@@ -42,9 +48,32 @@ note](002-design-decisions.md#historical-the-websocket-transport-we-replaced) fo
 | --------------- | ------------------------------------------------------------------------- |
 | client → Unity  | `POST / {"type":"executeEditorCommand","data":{"code":"…"}}`              |
 | Unity → client  | `200 OK` + the result payload as the JSON body                            |
-| client → Unity  | `POST /` with type `getEditorState` · `takeScreenshot` · `getGameObjectDetails` · `getLogs` · `clearLogs` |
+| client → Unity  | `POST /` with type `getEditorState` · `takeScreenshot` · `getGameObjectDetails` · `getLogs` · `clearLogs` · `identity` |
 | Unity → client  | `400`/`500` + `{ "error": … }` for an unknown type or a handler failure   |
-| any → Unity     | `GET` / `HEAD /` → `200 {"status":"ok","server":"UnityMCP"}` (liveness check); any other method → `405` |
+| any → Unity     | `GET` / `HEAD /` → `200` identity payload `{status, server, instanceId, name, projectPath, port, …}` (liveness + identity probe); any other method → `405` |
+
+## Discovery & multiple instances
+
+Several Editors can run at once, so there's no fixed port to dial. Discovery replaces it:
+
+- **Dynamic port.** On start each Editor binds an OS-assigned port and **pins it in `SessionState`**,
+  so the port is stable across domain reloads (the process lives on; only managed state resets) and a
+  selected instance stays reachable at the same address after a recompile.
+- **Self-registration.** The plugin writes a JSON record — `{ instanceId, name, projectPath, port,
+  pid, unityVersion }` — to a shared per-user directory (`InstanceRegistry`). `instanceId` is a short
+  stable hash of the project path (also the file name); `name` is the project-folder leaf. The record
+  is rewritten on every (re)bind and deleted on quit; a crash leaves it orphaned.
+- **The registry directory** is computed identically by both sides, with a `UNITYMCP_REGISTRY_DIR`
+  override: `%LOCALAPPDATA%\UnityMCP\instances` (Windows), `~/Library/Application Support/UnityMCP/instances`
+  (macOS), `$XDG_RUNTIME_DIR`/`~/.local/state/UnityMCP/instances` (Linux).
+- **Liveness is probed, not assumed.** `list_unity_instances` reads the directory and GETs each port,
+  confirming the response's `instanceId` matches the record (so a reused port can't masquerade as the
+  dead instance). A refused port means the record is orphaned, and it's deleted (self-heal).
+- **Selection is required.** A tool that talks to Unity resolves its target from the call's `instance`
+  argument, else the session's selected default (`select_unity_instance`, or the `UNITYMCP_INSTANCE`
+  seed). With neither, the call fails rather than guessing — so it can't land in the wrong project.
+  Resolution reads the registry per call, so a reload is transparent and a closed Editor gives a clear
+  error.
 
 ## Transport: hand-rolled HTTP
 
@@ -94,6 +123,8 @@ receive loops or send locks to manage.
 
 | Tool                     | What it does                                                             |
 | ------------------------ | ------------------------------------------------------------------------ |
+| `list_unity_instances`   | Lists running Editors (name, project, `instanceId`) for selection.       |
+| `select_unity_instance`  | Sets the default target Editor for the session (calls can override).     |
 | `execute_editor_command` | Compiles and runs LLM-authored C# in the Editor; returns result + logs.  |
 | `get_editor_state`       | Returns Unity/scene/project state on demand (bounded).                   |
 | `get_object_details`     | Returns one GameObject's transform, components, and size/bounds info.    |
@@ -123,11 +154,16 @@ receive loops or send locks to manage.
 
 ## MCP server (client) internals
 
-- `communication/UnityConnection.ts` sends each tool call as an HTTP POST and returns the JSON
-  response. `sendRequest(type, data, timeoutMs)` aborts after `timeoutMs` and **retries a refused
-  connection** (bounded, ~20s — `connectWaitMs`), so a call issued during a domain reload pauses for
-  the bounce instead of failing. A connection *reset* mid-request is surfaced as *may have applied —
-  check state* rather than retried.
+- **Discovery & routing.** `communication/registry.ts` reads the registry directory, probes liveness,
+  and resolves a name/id to a record; `ConnectionPool` holds one connection per target instance;
+  `session.ts` remembers the selected default. `index.ts` resolves each call's target (call arg →
+  session default → error) before dispatching, and centrally injects the required `comment` and
+  optional `instance` arguments into every Unity-talking tool's schema.
+- `communication/UnityConnection.ts` sends each tool call as an HTTP POST to **its instance's** base
+  URL and returns the JSON response. `sendRequest(type, data, timeoutMs)` aborts after `timeoutMs` and
+  **retries a refused connection** (bounded, ~20s — `connectWaitMs`), so a call issued during a domain
+  reload pauses for the bounce instead of failing. A connection *reset* mid-request is surfaced as
+  *may have applied — check state* rather than retried.
 - **Lifetime.** Nothing keeps the process alive but its stdio transport, so it exits when the client
   (Claude) goes away — there's no background reconnect timer, hence no lingering "zombie" servers.
 - **Resources:** files in `unity-mcp-server/src/resources/text/` are copied into the build and exposed
@@ -139,7 +175,8 @@ receive loops or send locks to manage.
 
 | File                      | Responsibility                                                            |
 | ------------------------- | ------------------------------------------------------------------------- |
-| `UnityMCPConnection.cs`   | Server lifecycle (bind/accept/teardown), request dispatch, log buffer, debug-window properties. |
+| `UnityMCPConnection.cs`   | Server lifecycle (dynamic-port bind/accept/teardown), request dispatch, log buffer, debug-window properties. |
+| `InstanceRegistry.cs`     | This instance's identity (id/name/project) and the registry record it writes/deletes for discovery. |
 | `ClientConnection.cs`     | One HTTP request/response exchange (read request, write response) over a raw socket. |
 | `EditorCommandExecutor.cs`| Compile + run LLM C#, scoped log capture, result payload.                |
 | `EditorStateReporter.cs`  | Build the bounded editor-state payload.                                  |
@@ -154,9 +191,12 @@ receive loops or send locks to manage.
 
 | Path                          | Responsibility                                                       |
 | ----------------------------- | ------------------------------------------------------------------- |
-| `index.ts`                    | MCP wiring: list/call tools, list/read resources.                   |
-| `communication/UnityConnection.ts` | HTTP client: POST a request, return the JSON response, retry a refused connection. |
-| `tools/*.ts`                  | One file per tool behind a common `Tool` interface.                 |
+| `index.ts`                    | MCP wiring: resolve each call's target instance, list/call tools, list/read resources. |
+| `communication/UnityConnection.ts` | HTTP client for one instance: POST a request, return the JSON response, retry a refused connection. |
+| `communication/registry.ts`   | Read the instance registry, probe liveness, resolve a name/id to a port (self-heals orphaned records). |
+| `communication/ConnectionPool.ts` | One `UnityConnection` per target instance, keyed by `instanceId`.  |
+| `session.ts`                  | The session's selected default instance (seeded from `UNITYMCP_INSTANCE`). |
+| `tools/*.ts`                  | One file per tool behind a common `Tool` interface (incl. `list`/`select` instances). |
 | `tools/commandResultCache.ts` | Shared cache + paging for oversized results.                        |
 | `resources/*.ts`              | Text-resource loading.                                              |
 
@@ -164,7 +204,9 @@ receive loops or send locks to manage.
 
 | Setting                  | Value / location                                                            |
 | ------------------------ | --------------------------------------------------------------------------- |
-| Port                     | `8080` (`UnityMCPConnection.Port`, `new UnityConnection(8080)`)             |
+| Port                     | OS-assigned per Editor, pinned in `SessionState` across reloads; published in the registry |
+| Registry directory       | `%LOCALAPPDATA%\UnityMCP\instances` (Win) · `~/Library/Application Support/UnityMCP/instances` (macOS) · `$XDG_RUNTIME_DIR`/`~/.local/state/UnityMCP/instances` (Linux); override `UNITYMCP_REGISTRY_DIR` |
+| Default instance         | `UNITYMCP_INSTANCE` (optional) seeds the session's selected instance                       |
 | Main-thread timeout      | `55s` (`EditorUtilities.MainThreadTimeoutMs`) — raise with the matching per-tool timeout if needed |
 | Editor-state caps        | ≤300 objects/assets, ≤500 hierarchy nodes, depth ≤8                        |
 | Result response cap      | ~25,000 chars before paging (`MAX_RESPONSE_CHARS`); cache TTL 5 min, 20 entries |
@@ -176,6 +218,9 @@ receive loops or send locks to manage.
 - Binds all interfaces (dual-stack) — could restrict to loopback if LAN exposure matters. There's no
   auth and `execute_editor_command` runs arbitrary C#, so don't expose the port to untrusted networks
   (see [005 — trust model](005-executing-csharp.md#trust-model)).
-- Fixed port; no negotiation if `8080` is taken by something else.
+- Discovery is a shared directory on one machine (no cross-host discovery), and liveness is a probe —
+  a crashed Editor's record lingers until the next `list_unity_instances` self-heals it.
+- Instance `name` is the project-folder leaf and can collide across unrelated projects; `instanceId`
+  (a hash of the project path) disambiguates, and selecting by a colliding bare name is rejected.
 - Logs are pulled, not streamed — fine for how Claude uses them; a long-poll endpoint could add
   near-real-time if ever needed.

@@ -26,7 +26,13 @@ namespace UnityMCP.Editor
     [InitializeOnLoad]
     public class UnityMCPConnection
     {
-        private const int Port = 8080;
+        // The Editor binds a DYNAMIC port. Multiple Editors can run at once, so a single fixed port
+        // would collide; instead each picks an OS-assigned port and publishes it via InstanceRegistry
+        // for MCP servers to discover. The chosen port is pinned in SessionState so it survives domain
+        // reloads (the process lives on; only managed state resets) - that keeps a client's selected
+        // instance reachable at the same address after a reload.
+        private const string PortSessionKey = "UnityMCP.BoundPort";
+        private static int boundPort;
 
         private static TcpListener listener;
         private static bool isListening;
@@ -61,7 +67,10 @@ namespace UnityMCP.Editor
         // owns the port and is accepting requests. False means the bind failed (e.g. another process
         // holds the port) - see LastErrorMessage.
         public static bool IsListening => isListening;
-        public static Uri ServerUri => new Uri($"http://localhost:{Port}/");
+        public static int BoundPort => boundPort;
+        public static Uri ServerUri => new Uri($"http://localhost:{boundPort}/");
+        public static string InstanceName => InstanceRegistry.Name;
+        public static string InstanceId => InstanceRegistry.InstanceId;
         public static string LastErrorMessage => lastErrorMessage;
         public static DateTime ServerStartedUtc => serverStartedUtc;
         public static string LastRequestType => lastRequestType;
@@ -146,6 +155,15 @@ namespace UnityMCP.Editor
                 StartServer();
             };
             AssemblyReloadEvents.beforeAssemblyReload += OnBeforeAssemblyReload;
+            // Remove our discovery record when the Editor exits so MCP servers stop offering this
+            // instance. A crash skips this; the MCP side self-heals by dropping records whose port
+            // no longer answers.
+            EditorApplication.quitting += OnEditorQuitting;
+        }
+
+        private static void OnEditorQuitting()
+        {
+            InstanceRegistry.Delete();
         }
 
         // A domain reload wipes all managed state (the listener, any in-flight socket, the
@@ -162,26 +180,54 @@ namespace UnityMCP.Editor
         {
             if (isListening) return;
 
+            // Prefer the port pinned earlier this Editor session so the address stays stable across
+            // domain reloads; 0 lets the OS assign one on first start. If a pinned port can't be
+            // reclaimed (e.g. something else grabbed it while we were closed), fall back to a fresh one.
+            int desired = SessionState.GetInt(PortSessionKey, 0);
+            if (!TryStart(desired) && desired != 0)
+            {
+                SessionState.SetInt(PortSessionKey, 0);
+                TryStart(0);
+            }
+        }
+
+        private static bool TryStart(int desired)
+        {
             try
             {
                 serverCts = new CancellationTokenSource();
-                listener = new TcpListener(IPAddress.IPv6Any, Port);
+                listener = new TcpListener(IPAddress.IPv6Any, desired);
                 // Accept both IPv4 (127.0.0.1) and IPv6 (::1) clients. If the runtime refuses
                 // dual-mode we still listen on IPv6, which is what "localhost" resolves to here.
                 try { listener.Server.DualMode = true; } catch { }
+                // Allow reclaiming our own pinned port right after a domain reload (the previous
+                // listener may linger briefly). Pinning is per-Editor-session, so no other Editor is
+                // contending for this port.
+                try { listener.Server.SetSocketOption(SocketOptionLevel.Socket, SocketOptionName.ReuseAddress, true); } catch { }
+                try { listener.ExclusiveAddressUse = false; } catch { }
                 listener.Start();
+                boundPort = ((IPEndPoint)listener.LocalEndpoint).Port;
+                SessionState.SetInt(PortSessionKey, boundPort);
                 isListening = true;
                 serverStartedUtc = DateTime.UtcNow;
                 lastErrorMessage = "";
-                Debug.Log($"[UnityMCP] HTTP server listening on http://localhost:{Port}/");
+                // Publish (or refresh) this instance's discovery record now that the port is known.
+                InstanceRegistry.Write(boundPort);
+                Debug.Log($"[UnityMCP] HTTP server listening on http://localhost:{boundPort}/  " +
+                          $"(instance '{InstanceRegistry.Name}' [{InstanceRegistry.InstanceId}])");
                 _ = AcceptLoop(serverCts.Token);
+                return true;
             }
             catch (Exception e)
             {
                 isListening = false;
-                lastErrorMessage = $"[UnityMCP] Failed to start server on port {Port}: {e.Message}";
+                lastErrorMessage = $"[UnityMCP] Failed to start server on port {(desired == 0 ? "(auto)" : desired.ToString())}: {e.Message}";
                 Debug.LogError(lastErrorMessage);
+                try { listener?.Stop(); } catch { }
                 listener = null;
+                // No reachable server - don't leave a record advertising a dead port.
+                InstanceRegistry.Delete();
+                return false;
             }
         }
 
@@ -277,7 +323,7 @@ namespace UnityMCP.Editor
             if (method != "POST")
             {
                 if (method == "GET" || method == "HEAD")
-                    return (200, "OK", JsonConvert.SerializeObject(new { status = "ok", server = "UnityMCP" }));
+                    return (200, "OK", JsonConvert.SerializeObject(InstanceRegistry.Identity(boundPort)));
                 return (405, "Method Not Allowed", JsonConvert.SerializeObject(new
                 {
                     error = $"{method} not supported - POST a JSON {{ type, data }} command, or GET for a health check."
@@ -363,6 +409,11 @@ namespace UnityMCP.Editor
                         break;
                     case "clearLogs":
                         payload = ClearLogPayload();
+                        break;
+                    case "identity":
+                        // Lets a client confirm which instance answers this port over POST; the GET
+                        // health check returns the same payload.
+                        payload = InstanceRegistry.Identity(boundPort);
                         break;
                     default:
                         return (400, "Bad Request",

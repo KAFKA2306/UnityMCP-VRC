@@ -16,14 +16,19 @@ export interface RequestSender {
 
 export class UnityConnection implements RequestSender {
   private readonly baseUrl: string;
+  // Human-facing name of the target instance, used in error messages (e.g. "Garibaldi").
+  private readonly label: string;
   private shuttingDown = false;
 
   // How long to keep retrying a refused connection before giving up. Covers a domain-reload bounce
   // (the listener is down for a beat) or the Editor still starting; past it we assume it's down.
   private readonly connectWaitMs = 20_000;
 
-  constructor(port: number = 8080) {
-    this.baseUrl = `http://localhost:${port}/`;
+  // baseUrl is resolved per target instance (each Editor hosts on its own dynamic port); label is
+  // that instance's name, for readable error messages.
+  constructor(opts: { baseUrl: string; label?: string }) {
+    this.baseUrl = opts.baseUrl;
+    this.label = opts.label ?? opts.baseUrl;
   }
 
   // Send a tool request to Unity and resolve with its JSON response payload. POSTs { type, data };
@@ -113,14 +118,15 @@ export class UnityConnection implements RequestSender {
     const code = err?.cause?.code ?? err?.code;
     if (code === "ECONNREFUSED") {
       return new Error(
-        "Unity isn't reachable on http://localhost:8080 - is the Editor running with the UnityMCP " +
-          "plugin? (It may also be mid domain-reload; it should come back within a few seconds.)",
+        `Unity instance '${this.label}' isn't reachable at ${this.baseUrl} - is that Editor still ` +
+          "running with the UnityMCP plugin? (It may be mid domain-reload; it should return within a " +
+          "few seconds. If it was closed, run list_unity_instances and re-select.)",
       );
     }
     if (code === "ECONNRESET" || code === "UND_ERR_SOCKET") {
       return new Error(
-        "Unity dropped the connection mid-request (it likely began a domain reload). The command " +
-          "may or may not have applied - check the editor/scene state before retrying.",
+        `Unity instance '${this.label}' dropped the connection mid-request (it likely began a domain ` +
+          "reload). The command may or may not have applied - check the editor/scene state before retrying.",
       );
     }
     return err instanceof Error ? err : new Error(String(err));
@@ -129,4 +135,15 @@ export class UnityConnection implements RequestSender {
 
 function delay(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+// A RequestSender that refuses to send. Handed to contexts that must expose the RequestSender shape
+// but have no Unity instance to talk to: static resources, and tools with requiresInstance === false
+// (list/select/get_command_page). Calling it is a programming error, so it throws.
+export function unusableSender(reason: string): RequestSender {
+  return {
+    sendRequest: async () => {
+      throw new Error(reason);
+    },
+  };
 }

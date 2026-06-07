@@ -9,14 +9,26 @@ import {
   McpError,
   ReadResourceRequestSchema,
 } from "@modelcontextprotocol/sdk/types.js";
-import { UnityConnection } from "./communication/UnityConnection.js";
+import {
+  RequestSender,
+  unusableSender,
+} from "./communication/UnityConnection.js";
+import { InstanceRegistry } from "./communication/registry.js";
+import { ConnectionPool } from "./communication/ConnectionPool.js";
+import { InstanceSession } from "./session.js";
 import { getAllResources, ResourceContext } from "./resources/index.js";
 import { getAllTools, ToolContext } from "./tools/index.js";
 import { requireComment } from "./tools/comment.js";
+import { addInstanceParam } from "./tools/instanceParam.js";
 
 class UnityMCPServer {
   private server: Server;
-  private unityConnection: UnityConnection;
+  // Discovery + routing across however many Unity Editors are running. The registry reads the shared
+  // instance directory; the pool holds one HTTP connection per target; the session remembers which
+  // instance this MCP process has selected as its default target.
+  private registry: InstanceRegistry;
+  private session: InstanceSession;
+  private pool: ConnectionPool;
   private initialized = false;
   private shuttingDown = false;
 
@@ -34,8 +46,12 @@ class UnityMCPServer {
       },
     );
 
-    // Connect (as a client) to the WebSocket server the Unity plugin hosts.
-    this.unityConnection = new UnityConnection(8080);
+    // No fixed endpoint anymore: each Unity Editor hosts its own HTTP server on a dynamic port and
+    // publishes itself in the shared instance registry. A tool call's target instance is resolved to
+    // a connection at call time (see setupTools).
+    this.registry = new InstanceRegistry();
+    this.session = new InstanceSession();
+    this.pool = new ConnectionPool();
 
     // Log MCP-layer errors, and exit cleanly when interrupted or asked to terminate.
     this.server.onerror = (error) => console.error("[MCP Error]", error);
@@ -83,8 +99,12 @@ class UnityMCPServer {
           );
         }
 
+        // Resources are static text and never call Unity, so they get a sender that errors if used
+        // (there's no single instance to bind them to).
         const resourceContext: ResourceContext = {
-          unityConnection: this.unityConnection,
+          unityConnection: unusableSender(
+            "Resources don't talk to a Unity instance.",
+          ),
         };
 
         const content = await resource.getContents(resourceContext);
@@ -106,9 +126,13 @@ class UnityMCPServer {
     const tools = getAllTools();
 
     // Advertise the available tools and their schemas. requireComment injects a required `comment`
-    // field into every tool's schema centrally, so all current and future tools get it uniformly.
+    // field; addInstanceParam adds the optional `instance` routing field to every tool that talks to
+    // a specific Editor. Both are applied centrally, so all current and future tools get them
+    // uniformly.
     this.server.setRequestHandler(ListToolsRequestSchema, async () => ({
-      tools: tools.map((tool) => requireComment(tool.getDefinition())),
+      tools: tools.map((tool) =>
+        addInstanceParam(requireComment(tool.getDefinition())),
+      ),
     }));
 
     // Dispatch a tool call to the matching tool.
@@ -141,16 +165,54 @@ class UnityMCPServer {
         );
       }
 
-      // No connection gate here. Tools that talk to Unity go through UnityConnection.sendRequest,
-      // which retries (bounded) a refused connection before giving up - so a request issued during a
-      // domain reload pauses for the bounce instead of failing, and a genuinely-down Editor surfaces
-      // a clear message. get_command_page is the exception: it reads the in-memory page cache and
-      // never calls Unity, so it works regardless of connection state.
+      // Resolve which Unity instance this call targets and bind a connection to it. Tools that don't
+      // talk to Unity (requiresInstance === false: list/select/get_command_page) skip resolution and
+      // get a sender that errors if misused.
       //
-      // forComment binds this call's comment to the connection so every request the tool sends is
-      // stamped with it, with no per-tool plumbing.
+      // Selection is required - several Editors may be running, so we never guess. The target is the
+      // call's own `instance` arg, else the instance selected for this session; with neither, we fail
+      // with a pointer to list/select. Routing reads the registry fresh each call, so a domain reload
+      // (same pinned port) is transparent, while a closed Editor surfaces a clear error.
+      //
+      // Once resolved, the per-target connection (which retries a refused connection briefly to ride
+      // out a reload) is bound to this call's comment so every request it sends is stamped with it.
+      const def = tool.getDefinition();
+      let unityConnection: RequestSender;
+
+      if (def.requiresInstance === false) {
+        unityConnection = unusableSender(
+          `${name} does not target a specific Unity instance.`,
+        );
+      } else {
+        const key =
+          (typeof args?.instance === "string" && args.instance.trim()) ||
+          this.session.get();
+        if (!key) {
+          throw new McpError(
+            ErrorCode.InvalidParams,
+            "No Unity instance selected. Call list_unity_instances to see what's running, then " +
+              "select_unity_instance (or pass `instance` on this call). Selection is required " +
+              "because more than one Editor may be open.",
+          );
+        }
+
+        let record;
+        try {
+          record = await this.registry.resolve(String(key));
+        } catch (err) {
+          throw new McpError(
+            ErrorCode.InvalidParams,
+            err instanceof Error ? err.message : String(err),
+          );
+        }
+
+        unityConnection = this.pool.forInstance(record).forComment(comment);
+      }
+
       const toolContext: ToolContext = {
-        unityConnection: this.unityConnection.forComment(comment),
+        unityConnection,
+        registry: this.registry,
+        session: this.session,
       };
 
       return await tool.execute(args, toolContext);
@@ -158,7 +220,7 @@ class UnityMCPServer {
   }
 
   private async cleanup() {
-    this.unityConnection.close();
+    this.pool.closeAll();
     await this.server.close();
   }
 

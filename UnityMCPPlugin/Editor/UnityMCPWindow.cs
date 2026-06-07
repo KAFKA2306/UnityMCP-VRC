@@ -48,6 +48,8 @@ namespace UnityMCP.Editor
                 EditorGUILayout.Space(5);
                 DrawAddress();
                 EditorGUILayout.Space(5);
+                DrawInstance();
+                EditorGUILayout.Space(5);
                 DrawLastRequest();
                 EditorGUILayout.Space(5);
                 DrawEditorState();
@@ -99,6 +101,18 @@ namespace UnityMCP.Editor
             EditorGUILayout.LabelField("Address:", GUILayout.Width(110));
             EditorGUILayout.SelectableLabel(
                 UnityMCPConnection.ServerUri.ToString(), EditorStyles.textField, GUILayout.Height(20));
+            EditorGUILayout.EndHorizontal();
+        }
+
+        // Which instance this Editor advertises to MCP servers (its discovery handle). With several
+        // Editors open, this is the name/id a client passes to select_unity_instance.
+        private static void DrawInstance()
+        {
+            EditorGUILayout.BeginHorizontal(EditorStyles.helpBox);
+            EditorGUILayout.LabelField("Instance:", GUILayout.Width(110));
+            EditorGUILayout.SelectableLabel(
+                $"{UnityMCPConnection.InstanceName}  ·  {UnityMCPConnection.InstanceId}",
+                EditorStyles.textField, GUILayout.Height(20));
             EditorGUILayout.EndHorizontal();
         }
 

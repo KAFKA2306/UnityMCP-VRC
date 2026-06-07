@@ -13,14 +13,15 @@ and adapted to this project's connection model.
 
 <p align="center">
   <img src="docs/screenshot.png" alt="The UnityMCP Debug Window showing the in-Editor server listening" width="420"><br>
-  <em>The Debug Window — the plugin's HTTP server listening on <code>http://localhost:8080</code>.</em>
+  <em>The Debug Window — the plugin's HTTP server, listening inside the Editor (each instance on its own port).</em>
 </p>
 
 ## Highlights
 
-- **One Editor, many Claude sessions.** The plugin hosts the HTTP server, so any number of
-  Claude sessions drive the same Editor at once — no fixed-port race, no "connected-but-dead"
-  zombie servers.
+- **Many Editors, many Claude sessions.** Each Editor's plugin hosts its own HTTP server on a
+  **dynamic port** and publishes itself to a shared registry, so you can run several projects at
+  once and address each by name — while any number of Claude sessions drive the same Editor. No
+  fixed-port race, no "connected-but-dead" zombie servers.
 - **Run real C#.** `execute_editor_command` runs LLM-authored C# (its own `using`s,
   classes, functions) with assembly references auto-discovered from everything loaded —
   UnityEngine, packages, VRChat/UdonSharp, project scripts — no hand-maintained list.
@@ -40,6 +41,8 @@ and adapted to this project's connection model.
 
 | Tool                     | What it does                                                         |
 | ------------------------ | ------------------------------------------------------------------- |
+| `list_unity_instances`   | Lists the Unity Editors currently running (name, project, `instanceId`) so you can pick one. |
+| `select_unity_instance`  | Chooses which Editor subsequent calls target by default (per session); calls can also override with `instance=`. |
 | `execute_editor_command` | Compiles and runs LLM-authored C# in the Editor; returns result + logs. Optional `timeoutMs` (default 60s, max 300s) for heavy ops like large imports. |
 | `get_editor_state`       | Returns Unity/scene/project state on demand (bounded).              |
 | `get_object_details`     | Inspects one GameObject: transform, components, and size info (Renderer bounds, mesh vertex counts, shared mesh/material names). |
@@ -81,14 +84,28 @@ Or Claude Code: `claude mcp add unity -- node C:\git\UnityMCP\unity-mcp-server\b
 Client** row appears once Claude starts (attach more than one session and each shows up).
 Prompt Claude; if a script errors, diagnose it in **UnityMCP > Script Tester**.
 
+## Working with multiple Editors
+
+Open as many projects as you like — each registers itself under its project-folder name. Within a
+Claude session:
+
+1. **`list_unity_instances`** — see what's running (name · project · `instanceId`).
+2. **`select_unity_instance <name>`** — target one for the rest of the session; individual calls can
+   override with `instance=<name>`.
+
+Tools refuse to run until an instance is selected, so a call never lands in the wrong project. To pin
+a session to one project up front, set `UNITYMCP_INSTANCE=<name>` in the MCP server's `env` (then the
+agent never has to select). Discovery records live in `%LOCALAPPDATA%\UnityMCP\instances\` (override
+with `UNITYMCP_REGISTRY_DIR`); each Editor shows its name + `instanceId` in the Debug Window.
+
 ## Troubleshooting
 
 - **"Connected" in Claude but nothing in Unity?** The MCP badge only reflects the
   Claude↔server handshake, not the link to Unity. Trust the **Debug Window**: *Server:
   Listening* + an *MCP Client* row are the real signals.
-- **Server won't bind / "NOT listening"?** Something holds port 8080 — often a stale MCP
-  server from the old architecture. Kill leftover `node` processes and click *Restart
-  Server*; the *Last Error* box shows the bind failure.
+- **Server won't bind / "NOT listening"?** Each Editor takes an OS-assigned port, so clashes are
+  unlikely; if the **Server** row is red, the *Last Error* box shows the bind failure. Click *Restart
+  Server* to pick a fresh port.
 - **Calls stall or time out?** The Editor throttles while unfocused — watch the *Editor*
   row's queue depth. Refocus Unity, or use *Preferences > General > Interaction Mode >
   No Throttling* for background use.
