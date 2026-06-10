@@ -118,6 +118,12 @@ On the backing `UdonBehaviour` (both are **fields**, not properties — reflect 
 - `serializedProgramAsset` → a `SerializedUdonProgramAsset` (program built and linked),
 - serialized property `serializedPublicVariablesBytesString` is non-empty (field values reached the heap).
 
+**Don't use `GetProgramVariable` to check edit-mode wiring.** On the backing `UdonBehaviour` it reads the Udon
+*runtime heap*, which only populates in Play mode, so it returns `null` for correctly-wired variables at edit
+time — a false "unwired" alarm. To read a field's value without Play mode, read the **proxy**
+`UdonSharpBehaviour`'s public field directly (what `get_object_details` does), or check
+`serializedPublicVariablesBytesString` as above.
+
 Watch for a **duplicate** backing UdonBehaviour from a half-finished attach (one wired, one orphan with a
 null `programSource`) — a failed first attempt that left a proxy behind, then a second that succeeded. Drop
 the unwired one. The definitive check is Play mode (ClientSim): the program only executes there.

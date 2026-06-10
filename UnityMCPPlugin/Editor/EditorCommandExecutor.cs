@@ -144,6 +144,13 @@ namespace UnityMCP.Editor
                 // Add this assembly so script can use utilities we provide
                 AddAssemblyReference(typeof(UnityMCP.Editor.EditorCommandExecutor).Assembly.Location);
 
+                // Add Newtonsoft.Json so snippets can (de)serialize JSON like the plugin does. The
+                // name-based loop below won't catch it (its assembly name is "Newtonsoft.Json"), and
+                // referencing the plugin assembly doesn't transitively expose Newtonsoft's types - the
+                // snippet needs the defining assembly referenced directly. Pinning it via JsonConvert's
+                // assembly guarantees we hand callers the exact Newtonsoft the plugin compiled against.
+                AddAssemblyReference(typeof(Newtonsoft.Json.JsonConvert).Assembly.Location);
+
                 // Add netstandard assembly
                 var netstandardAssembly = AppDomain.CurrentDomain.GetAssemblies()
                     .FirstOrDefault(a => a.GetName().Name == "netstandard");

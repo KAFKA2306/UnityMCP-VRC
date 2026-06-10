@@ -35,3 +35,7 @@ UdonSharp is a compiler that compiles C# to Udon assembly. UdonSharp is not curr
 
 ## Udon bugs that affect U#
 - Mutating methods on structs do not modify the struct (this can be seen on things like calling Normalize() on a Vector3) https://vrchat.canny.io/vrchat-udon-closed-alpha-bugs/p/raysetorigin-and-raysetdirection-not-working
+
+## Reading field values in the editor
+- On the backing `VRC.Udon.UdonBehaviour`, `GetProgramVariable(name)` reads the **runtime heap**, which only populates in Play mode — in edit mode it returns `null` even when wiring is correct. Don't use it to check wiring at edit time; it produces false "unwired" alarms.
+- To read a U# field's value without Play mode, read the **proxy** `UdonSharpBehaviour`'s public field directly (`get_object_details` already does this), or confirm the heap was written via the backing behaviour's serialized `serializedPublicVariablesBytesString` (non-empty ⇒ `CopyProxyToUdon` ran).

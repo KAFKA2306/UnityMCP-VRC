@@ -62,8 +62,10 @@ The full base class library is available — `System.Collections.Generic` (`List
 `Dictionary<,>`, `HashSet<T>`, …), `System.Linq`, `System.IO`, `System.Text`,
 `System.Threading.Tasks`, `System.Reflection`, and so on — alongside all `UnityEngine`
 modules, `UnityEditor`, installed `Unity.*` packages, the VRChat/UdonSharp assemblies, and
-the project's own `Assembly-CSharp` / `Assembly-CSharp-Editor` types. You still have to add
-the matching `using` directives yourself; nothing is implicitly imported.
+the project's own `Assembly-CSharp` / `Assembly-CSharp-Editor` types. **`Newtonsoft.Json`** is
+also referenced, so `using Newtonsoft.Json;` works for richer JSON than `JsonUtility` (which
+can't do dictionaries, polymorphism, or top-level arrays). You still have to add the matching
+`using` directives yourself; nothing is implicitly imported.
 
 If a type that *should* exist fails with **`CS1070` ("type forwarded to an assembly that is
 not referenced")**, it usually means a BCL facade assembly isn't on the reference list.

@@ -87,6 +87,9 @@ namespace UnityMCP.Editor
                 {
                     if (!prop.CanRead || prop.GetIndexParameters().Length > 0) continue;
                     if (SkipProperties.Contains(prop.Name)) continue;
+                    // Reading [Obsolete] getters (e.g. AudioSource.rolloffFactor/minVolume/maxVolume)
+                    // spams the console with deprecation warnings - and the values are redundant anyway.
+                    if (prop.IsDefined(typeof(ObsoleteAttribute), inherit: true)) continue;
                     try { fieldsData[prop.Name] = SummarizeValue(prop.GetValue(comp)); }
                     catch { }
                 }
