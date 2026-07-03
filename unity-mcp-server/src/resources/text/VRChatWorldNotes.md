@@ -1,3 +1,4 @@
+<!-- description: VRChat world building: project layout, the UdonSharp component-attach dance, and workflow conventions. -->
 # VRChat World Unity Project Notes
 
 ## Project Structure

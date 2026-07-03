@@ -106,8 +106,9 @@ Two deliberate choices:
   until the recompile + domain reload finishes (see [004 — Unity Editor states](004-unity-editor-states.md)).
   That compile also confirms the behaviour's body is Udon-compatible — if it used a non-exposed API the U#
   compile would fail and produce no serialized program.
-- **The executor is Mono `mcs` (C# 7.0): no local functions, no statement-bodied lambdas.** They emit a
-  cascade of bogus parse errors; hoist helpers to static methods on the `EditorCommand` class. Details in the
+- **On VRChat projects the executor is Mono `mcs` (C# 7.0): no local functions, no statement-bodied lambdas.**
+  They emit a cascade of bogus parse errors; hoist helpers to static methods on the `EditorCommand` class.
+  (VRChat SDK projects are always .NET Framework profile, so they always use this backend.) Details in the
   `UnityScriptingNotes` resource.
 
 ## Verifying the wiring (without Play mode)

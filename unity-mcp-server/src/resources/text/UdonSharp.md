@@ -1,3 +1,4 @@
+<!-- description: VRChat/UdonSharp: which C# language features the Udon compiler supports (and rejects). -->
 # UdonSharp
 
 ## A compiler for compiling C# to Udon assembly

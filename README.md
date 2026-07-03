@@ -6,10 +6,12 @@ it one request per tool call and exposes the tools to Claude — run C# in the E
 editor/scene state, and pull Unity console logs.
 
 Forked from [Arodoid/UnityMCP](https://github.com/Arodoid/UnityMCP) and extensively
-refactored, with a focus on using Claude to build **VRChat / UdonSharp** worlds — though
-most of it works for ordinary Unity development too. The `take_screenshot` and
-`get_object_details` tools were ported from [setohima/UnityMCP-VRC](https://github.com/setohima/UnityMCP-VRC)
-and adapted to this project's connection model.
+refactored, with a focus on using Claude to build **VRChat / UdonSharp** and **Basis**
+worlds — though most of it works for ordinary Unity development too. It runs on **Unity
+2022.3 through Unity 6** (the command sandbox picks a compile backend per project — see
+below). The `take_screenshot` and `get_object_details` tools were ported from
+[setohima/UnityMCP-VRC](https://github.com/setohima/UnityMCP-VRC) and adapted to this
+project's connection model.
 
 <p align="center">
   <img src="docs/screenshot.png" alt="The UnityMCP Debug Window showing the in-Editor server listening" width="420"><br>
@@ -24,7 +26,12 @@ and adapted to this project's connection model.
   fixed-port race, no "connected-but-dead" zombie servers.
 - **Run real C#.** `execute_editor_command` runs LLM-authored C# (its own `using`s,
   classes, functions) with assembly references auto-discovered from everything loaded —
-  UnityEngine, packages, VRChat/UdonSharp, project scripts — no hand-maintained list.
+  UnityEngine, packages, VRChat/UdonSharp, Basis, project scripts — no hand-maintained list.
+- **Unity 2022.3 → Unity 6.** The command sandbox compiles with Mono's in-process compiler
+  on .NET Framework projects (the Unity 2022 / VRChat norm) and automatically falls back to
+  the Editor's bundled Roslyn `csc` on .NET Standard projects (the Unity 6 default), where
+  the Mono path is unavailable. The fallback is detected once and cached; nothing to
+  configure. Detail: [docs/005](docs/005-executing-csharp.md#compilation).
 - **Bounded state.** `get_editor_state` returns scene/project state on demand, capped so
   a big project can't blow up the context window.
 - **See what it's doing.** `take_screenshot` renders the Scene or game camera back to Claude

@@ -2,7 +2,9 @@ using UnityEngine;
 using UnityEditor;
 using System;
 using System.Collections.Generic;
+using System.IO;
 using System.Linq;
+using System.Text;
 using System.Threading.Tasks;
 using System.Reflection;
 using System.Runtime.ExceptionServices;
@@ -101,6 +103,36 @@ namespace UnityMCP.Editor
             });
         }
 
+        // Two compile backends share one auto-discovered reference list:
+        //  - Mono's in-process CodeDom compiler, on projects whose API compatibility level is
+        //    .NET Framework (e.g. Unity 2022-era VRChat projects).
+        //  - The Roslyn csc bundled inside the Editor installation, run out of process, on
+        //    projects whose API level is .NET Standard (the Unity 6 default) - there the
+        //    CodeDom provider is a stub whose compile methods throw PlatformNotSupportedException.
+        // The first PlatformNotSupportedException flips the choice to Roslyn. It's cached in
+        // SessionState (not just a static), so the probe + its log line happen once per Editor
+        // *session* rather than once per domain reload - statics reset on reload, SessionState
+        // survives it. A full Editor restart re-probes once, which is correct: the project's API
+        // profile can change between runs. CodeDom behavior is untouched on projects where it works.
+        const string UseBundledRoslynKey = "UnityMCP.UseBundledRoslyn";
+        static int s_useBundledRoslyn = -1; // -1 = not yet resolved in this domain
+        static string s_bundledDotnet;
+        static string s_bundledCsc;
+
+        static bool UseBundledRoslyn
+        {
+            get
+            {
+                if (s_useBundledRoslyn < 0)
+                    s_useBundledRoslyn = SessionState.GetBool(UseBundledRoslynKey, false) ? 1 : 0;
+                return s_useBundledRoslyn == 1;
+            }
+            set
+            {
+                s_useBundledRoslyn = value ? 1 : 0;
+                SessionState.SetBool(UseBundledRoslynKey, value);
+            }
+        }
 
         public static object CompileAndExecute(string code)
         {
@@ -108,32 +140,48 @@ namespace UnityMCP.Editor
             // EditorUtilities.RunOnMainThread, whose queue already defers while the Editor is
             // compiling, so by the time this runs the domain is stable. (The Script Tester window
             // calls this directly from a user click, which is also never mid-compile.)
+            var references = GatherReferenceAssemblies();
 
-            // Use Mono's built-in compiler
-            var options = new System.CodeDom.Compiler.CompilerParameters
+            Assembly assembly;
+            if (UseBundledRoslyn)
             {
-                GenerateInMemory = true,
-                // Fixes error: The predefined type 'xxx' is defined multiple times. Using definition from 'mscorlib.dll'
-                CompilerOptions = "/nostdlib+ /noconfig"
-            };
+                assembly = CompileWithBundledRoslyn(code, references);
+            }
+            else
+            {
+                try
+                {
+                    assembly = CompileWithCodeDom(code, references);
+                }
+                catch (PlatformNotSupportedException)
+                {
+                    UseBundledRoslyn = true;
+                    Debug.Log("[UnityMCP] CodeDom compilation is unavailable under this project's API profile; using the Editor's bundled Roslyn compiler from now on.");
+                    assembly = CompileWithBundledRoslyn(code, references);
+                }
+            }
 
-            // Track added assemblies to avoid duplicates
-            HashSet<string> addedAssemblies = new HashSet<string>();
+            return InvokeEditorCommand(assembly);
+        }
 
-            // Helper method to safely add assembly references
+        // Builds the reference list both backends compile against. Since compilation runs with
+        // /nostdlib+ (no implicit references), this list is the complete universe the snippet
+        // can see.
+        static List<string> GatherReferenceAssemblies()
+        {
+            var references = new List<string>();
+            var added = new HashSet<string>();
+
             void AddAssemblyReference(string assemblyPath)
             {
-                if (!string.IsNullOrEmpty(assemblyPath) && !addedAssemblies.Contains(assemblyPath))
+                if (!string.IsNullOrEmpty(assemblyPath) && added.Add(assemblyPath))
                 {
-                    options.ReferencedAssemblies.Add(assemblyPath);
-                    addedAssemblies.Add(assemblyPath);
+                    references.Add(assemblyPath);
                 }
             }
 
             try
             {
-                options.CoreAssemblyFileName = typeof(object).Assembly.Location;
-
                 // Add engine/editor core references
                 AddAssemblyReference(typeof(UnityEngine.Object).Assembly.Location);
                 AddAssemblyReference(typeof(UnityEditor.Editor).Assembly.Location);
@@ -178,6 +226,7 @@ namespace UnityMCP.Editor
                         name.StartsWith("VRC") ||           // VRCSDK3, VRCSDKBase, VRC.Udon, ...
                         name.StartsWith("UdonSharp") ||
                         name.StartsWith("UnityMCP") ||      // the plugin's own helpers (UdonSharpHelper, ...)
+                        name.StartsWith("Basis") ||         // Basis framework (BasisFramework, BasisNetworkCore, ...)
                         name == "Assembly-CSharp" ||        // project runtime scripts
                         name == "Assembly-CSharp-Editor" || // project editor scripts (e.g. SsxLevelImporter)
                         // BCL facades. Because we compile with /nostdlib+, the compiler adds no
@@ -200,7 +249,24 @@ namespace UnityMCP.Editor
                 Debug.LogWarning($"[UnityMCP] Assembly reference setup issue: {e.Message}");
             }
 
-            // Compile and execute
+            return references;
+        }
+
+        static Assembly CompileWithCodeDom(string code, List<string> references)
+        {
+            // Use Mono's built-in compiler
+            var options = new System.CodeDom.Compiler.CompilerParameters
+            {
+                GenerateInMemory = true,
+                // Fixes error: The predefined type 'xxx' is defined multiple times. Using definition from 'mscorlib.dll'
+                CompilerOptions = "/nostdlib+ /noconfig",
+                CoreAssemblyFileName = typeof(object).Assembly.Location
+            };
+            foreach (var reference in references)
+            {
+                options.ReferencedAssemblies.Add(reference);
+            }
+
             using (var provider = new Microsoft.CSharp.CSharpCodeProvider())
             {
                 var results = provider.CompileAssemblyFromSource(options, code);
@@ -214,23 +280,162 @@ namespace UnityMCP.Editor
                     throw new Exception($"Compilation failed:\n{errors}");
                 }
 
-                var assembly = results.CompiledAssembly;
-                var type = assembly.GetType("EditorCommand");
-                var method = type.GetMethod("Execute");
-                try
+                return results.CompiledAssembly;
+            }
+        }
+
+        // Compiles with the Roslyn csc that ships inside the Editor installation, invoked out of
+        // process, then loads the resulting assembly bytes into the Editor domain. Works under
+        // any API compatibility level; also lifts the language level from CodeDom's C# 7.0 to
+        // whatever the bundled compiler supports.
+        static Assembly CompileWithBundledRoslyn(string code, List<string> references)
+        {
+            ResolveBundledRoslyn();
+
+            var workDir = Path.Combine(Path.GetTempPath(), "UnityMCP", Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(workDir);
+            try
+            {
+                var sourcePath = Path.Combine(workDir, "EditorCommand.cs");
+                var outPath = Path.Combine(workDir, "EditorCommand.dll");
+                var rspPath = Path.Combine(workDir, "args.rsp");
+                File.WriteAllText(sourcePath, code);
+
+                // Response file to stay clear of the OS command-line length limit (the reference
+                // list alone is a few hundred paths). -noconfig can't go in a response file, so it
+                // stays on the command line.
+                var rsp = new StringBuilder();
+                rsp.AppendLine("-nologo");
+                rsp.AppendLine("-target:library");
+                rsp.AppendLine("-langversion:latest");
+                rsp.AppendLine("-nostdlib+"); // same reference discipline as the CodeDom path
+                rsp.AppendLine($"-out:\"{outPath}\"");
+                foreach (var reference in references)
                 {
-                    return method.Invoke(null, null);
+                    rsp.AppendLine($"-r:\"{reference}\"");
                 }
-                catch (TargetInvocationException tie) when (tie.InnerException != null)
+                rsp.AppendLine($"\"{sourcePath}\"");
+                File.WriteAllText(rspPath, rsp.ToString());
+
+                var startInfo = new System.Diagnostics.ProcessStartInfo
                 {
-                    // Reflection wraps whatever EditorCommand.Execute() throws in a
-                    // TargetInvocationException, whose message ("Exception has been thrown by the
-                    // target of an invocation") and stack trace are reflection plumbing, not the real
-                    // failure. Rethrow the inner exception - preserving its original stack - so callers
-                    // report the actual error (e.g. MissingComponentException) instead of the wrapper.
-                    ExceptionDispatchInfo.Capture(tie.InnerException).Throw();
-                    throw; // unreachable: Throw() above always rethrows; satisfies the compiler.
+                    FileName = s_bundledDotnet,
+                    Arguments = $"exec \"{s_bundledCsc}\" -noconfig @\"{rspPath}\"",
+                    UseShellExecute = false,
+                    RedirectStandardOutput = true,
+                    RedirectStandardError = true,
+                    CreateNoWindow = true,
+                    WorkingDirectory = workDir
+                };
+
+                string output;
+                int exitCode;
+                using (var process = System.Diagnostics.Process.Start(startInfo))
+                {
+                    var stdout = process.StandardOutput.ReadToEndAsync();
+                    var stderr = process.StandardError.ReadToEndAsync();
+                    if (!process.WaitForExit(120000))
+                    {
+                        try { process.Kill(); } catch { }
+                        throw new Exception("Compilation timed out after 120s (bundled Roslyn csc)");
+                    }
+                    output = (stdout.Result + "\n" + stderr.Result).Trim();
+                    exitCode = process.ExitCode;
                 }
+
+                if (exitCode != 0)
+                {
+                    // csc emits "path(line,col): error CSxxxx: message" lines; surface those (or
+                    // everything, if the failure didn't produce diagnostics in that shape).
+                    var errorLines = output.Split('\n')
+                        .Select(l => l.Trim())
+                        .Where(l => l.Contains("error ")) // ordinal; single-arg overload exists on every API profile
+                        .ToList();
+                    var errors = errorLines.Count > 0 ? string.Join("\n", errorLines) : output;
+                    foreach (var line in errorLines)
+                    {
+                        Debug.LogError(line);
+                    }
+                    throw new Exception($"Compilation failed:\n{errors}");
+                }
+
+                return Assembly.Load(File.ReadAllBytes(outPath));
+            }
+            finally
+            {
+                try { Directory.Delete(workDir, true); } catch { /* temp dir; best effort */ }
+            }
+        }
+
+        // Locates dotnet + csc.dll inside the running Editor's installation. Layout varies:
+        //  - Unity 2022.3 and Unity 6 before 6000.5: Data/DotNetSdkRoslyn/csc.dll, run with
+        //    Data/NetCoreRuntime/dotnet.
+        //  - Unity 6000.5+: a full .NET SDK at Data/DotNetSdk; csc.dll sits in the versioned
+        //    sdk dir (sdk/<version>/Roslyn/bincore/csc.dll), run with the SDK's own dotnet so
+        //    the runtime always matches the compiler.
+        static void ResolveBundledRoslyn()
+        {
+            if (s_bundledCsc != null) return;
+
+            var contents = EditorApplication.applicationContentsPath;
+            var exe = Application.platform == RuntimePlatform.WindowsEditor ? ".exe" : "";
+
+            var csc = Path.Combine(contents, "DotNetSdkRoslyn", "csc.dll");
+            var dotnet = Path.Combine(contents, "NetCoreRuntime", "dotnet" + exe);
+            if (File.Exists(csc) && File.Exists(dotnet))
+            {
+                s_bundledCsc = csc;
+                s_bundledDotnet = dotnet;
+                return;
+            }
+
+            var sdkRoot = Path.Combine(contents, "DotNetSdk");
+            dotnet = Path.Combine(sdkRoot, "dotnet" + exe);
+            var sdkVersions = Path.Combine(sdkRoot, "sdk");
+            if (File.Exists(dotnet) && Directory.Exists(sdkVersions))
+            {
+                foreach (var versionDir in Directory.GetDirectories(sdkVersions).OrderByDescending(d => d, StringComparer.OrdinalIgnoreCase))
+                {
+                    csc = Path.Combine(versionDir, "Roslyn", "bincore", "csc.dll");
+                    if (File.Exists(csc))
+                    {
+                        s_bundledCsc = csc;
+                        s_bundledDotnet = dotnet;
+                        return;
+                    }
+                }
+            }
+
+            throw new Exception(
+                "Could not locate the Editor's bundled Roslyn compiler " +
+                $"(looked for DotNetSdkRoslyn/csc.dll and DotNetSdk/sdk/*/Roslyn/bincore/csc.dll under {contents})");
+        }
+
+        static object InvokeEditorCommand(Assembly assembly)
+        {
+            var type = assembly.GetType("EditorCommand");
+            if (type == null)
+            {
+                throw new Exception("Compiled code must define a top-level class named 'EditorCommand'");
+            }
+            var method = type.GetMethod("Execute");
+            if (method == null)
+            {
+                throw new Exception("'EditorCommand' must define a public static method 'Execute'");
+            }
+            try
+            {
+                return method.Invoke(null, null);
+            }
+            catch (TargetInvocationException tie) when (tie.InnerException != null)
+            {
+                // Reflection wraps whatever EditorCommand.Execute() throws in a
+                // TargetInvocationException, whose message ("Exception has been thrown by the
+                // target of an invocation") and stack trace are reflection plumbing, not the real
+                // failure. Rethrow the inner exception - preserving its original stack - so callers
+                // report the actual error (e.g. MissingComponentException) instead of the wrapper.
+                ExceptionDispatchInfo.Capture(tie.InnerException).Throw();
+                throw; // unreachable: Throw() above always rethrows; satisfies the compiler.
             }
         }
     }

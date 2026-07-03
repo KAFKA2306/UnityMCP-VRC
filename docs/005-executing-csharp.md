@@ -23,17 +23,31 @@ command's `result`, so hand back plain values / anonymous objects (ids, names, c
 
 ## Compilation
 
-`EditorCommandExecutor.CompileAndExecute` uses Mono's CodeDom `CSharpCodeProvider`:
+`EditorCommandExecutor.CompileAndExecute` picks between two backends, decided by the project's API
+compatibility level:
 
-- **Language level is C# 7.0** — newer syntax (switch expressions, `using` declarations, ranges,
-  target-typed `new()`, the bare `default` literal) is a hard compile error. Workarounds are in the
-  scripting-notes resource.
+- **Mono's CodeDom `CSharpCodeProvider`** (in-process) on .NET Framework-profile projects — the
+  Unity 2022-era / VRChat norm. **Language level is C# 7.0** — newer syntax (switch expressions,
+  `using` declarations, ranges, target-typed `new()`, the bare `default` literal) is a hard compile
+  error. Workarounds are in the scripting-notes resource.
+- **The Editor's own bundled Roslyn `csc`** (out of process) on .NET Standard-profile projects —
+  the Unity 6 default, where the CodeDom provider is a stub whose compile methods throw
+  `PlatformNotSupportedException`. The first such throw flips the executor to Roslyn for the rest
+  of the Editor session (one failed probe, ever). `csc` is resolved from inside the running Editor's
+  installation — `Data/DotNetSdkRoslyn/csc.dll` (Unity 2022.3, and Unity 6 before 6000.5) or
+  `Data/DotNetSdk/sdk/<version>/Roslyn/bincore/csc.dll` (6000.5+), each run with its sibling
+  `dotnet` host so runtime and compiler always match. The snippet compiles to a temp-dir DLL with
+  `-langversion:latest` (modern C# is fine here) via a response file, and the executor
+  `Assembly.Load`s the bytes so no file stays locked.
+
+Both backends compile against the same auto-discovered reference list, with the same flags:
+
 - **`/nostdlib+ /noconfig`** — the compiler adds *no* implicit references, so we control the full set
   (and sidestep "predefined type defined multiple times").
 - **Assembly references are auto-discovered**, not hand-maintained: the executor walks every loaded,
   non-dynamic assembly and references those whose name matches —
   - `UnityEngine*` (all engine modules, incl. `ImageConversion`, `ScreenCapture`),
-  - `Unity.*` (packages: TextMeshPro, Burst, …), `VRC*`, `UdonSharp*`,
+  - `Unity.*` (packages: TextMeshPro, Burst, …), `VRC*`, `UdonSharp*`, `Basis*`,
   - `Assembly-CSharp` / `Assembly-CSharp-Editor` (the project's own scripts),
   - the .NET base class library: `mscorlib`, `System`, the `System.*` facades, `netstandard`.
 

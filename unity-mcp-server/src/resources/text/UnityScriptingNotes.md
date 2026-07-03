@@ -1,13 +1,20 @@
+<!-- description: C# gotchas for execute_editor_command snippets — applies to every Unity project (VRChat, Basis, plain). -->
 # Unity C# scripting notes (for execute_editor_command)
 
 Gotchas when writing C# that runs in the Editor via `execute_editor_command` — what won't
 compile, and what compiles but bites silently (the code *looks* like it worked).
 
-## The executor compiles as C# 7.0
+## Language level depends on the project's API profile
 
-Commands are compiled at language version **C# 7.0**, so newer syntax is a hard compile
-error. Most common one: the **bare `default` literal isn't allowed** — write the typed
-form `default(T)`:
+On **.NET Framework-profile projects** (the Unity 2022-era / VRChat norm) commands compile
+with Mono's compiler at language version **C# 7.0**, so newer syntax is a hard compile
+error. On **.NET Standard-profile projects** (the Unity 6 default) commands compile with
+the Editor's bundled Roslyn at `-langversion:latest` and modern C# just works — the C# 7.0
+rules below don't apply. If you don't know which profile the project uses, write
+C# 7.0-style code; it compiles on both.
+
+The C# 7.0 rules: the most common trip-up is the **bare `default` literal isn't allowed** —
+write the typed form `default(T)`:
 
 ```csharp
 int n = default;            // ERROR (C# 7.1 feature)
@@ -30,11 +37,12 @@ be used because it is not part of the C# 7.0 language specification`, or a parse
 like `CS1525: Unexpected symbol`. If you see either, downgrade the syntax rather than
 retrying the same code.
 
-### Local functions and statement-bodied lambdas don't parse
+### Local functions and statement-bodied lambdas don't parse (Mono backend)
 
-The executor compiles with the **Mono `CSharpCodeProvider` (mcs)**, which — even though local
-functions are a C# 7.0 feature — does **not** accept them, and chokes on statement-bodied
-lambdas too. They surface as a cascade of nonsense parse errors (`CS1525`, `CS1519`,
+On .NET Framework-profile projects the executor compiles with the **Mono
+`CSharpCodeProvider` (mcs)**, which — even though local functions are a C# 7.0 feature —
+does **not** accept them, and chokes on statement-bodied lambdas too. (The Roslyn backend
+on .NET Standard projects accepts both.) They surface as a cascade of nonsense parse errors (`CS1525`, `CS1519`,
 `Primary constructor body is not allowed`, `Identifier expected, '=>' is a keyword`) pointing
 at the function/lambda line. Hoist them to **static methods on the `EditorCommand` class**:
 
@@ -61,8 +69,9 @@ Expression-bodied lambdas (`x => x.Name`, `(a,b) => a.CompareTo(b)`) are fine �
 The full base class library is available — `System.Collections.Generic` (`List<T>`,
 `Dictionary<,>`, `HashSet<T>`, …), `System.Linq`, `System.IO`, `System.Text`,
 `System.Threading.Tasks`, `System.Reflection`, and so on — alongside all `UnityEngine`
-modules, `UnityEditor`, installed `Unity.*` packages, the VRChat/UdonSharp assemblies, and
-the project's own `Assembly-CSharp` / `Assembly-CSharp-Editor` types. **`Newtonsoft.Json`** is
+modules, `UnityEditor`, installed `Unity.*` packages, the VRChat/UdonSharp assemblies, the
+`Basis*` framework assemblies, and the project's own `Assembly-CSharp` /
+`Assembly-CSharp-Editor` types. **`Newtonsoft.Json`** is
 also referenced, so `using Newtonsoft.Json;` works for richer JSON than `JsonUtility` (which
 can't do dictionaries, polymorphism, or top-level arrays). You still have to add the matching
 `using` directives yourself; nothing is implicitly imported.

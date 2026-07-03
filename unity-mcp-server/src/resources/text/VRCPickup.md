@@ -1,3 +1,4 @@
+<!-- description: VRChat: VRCPickup and Interactable proximity/grab-distance rules. -->
 Allows objects to be picked up, held and used by players.
 
 ## Proximity Rules
